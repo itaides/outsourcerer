@@ -12882,7 +12882,9 @@ run_job() {
   if have jq; then
     jq -cn --arg id "$id" --arg p "$prov" --arg v "$verb" --arg m "$id2" --arg t "$tier" --arg lane "$lane" \
        --arg cwd "$PWD" --argjson st "$_started" --arg wt "$wt" --arg wbr "$wbr" --arg wbase "$wbase" \
-       '{id:$id,provider:$p,verb:$v,model:$m,tier:$t,cwd:$cwd,started:$st}
+       --arg ww "$warn" --arg wk "$kill" --arg wh "$hard" \
+       '{id:$id,provider:$p,verb:$v,model:$m,tier:$t,cwd:$cwd,started:$st,
+         watchdog:{warn_s:($ww|tonumber? // null),stall_s:($wk|tonumber? // null),hard_s:($wh|tonumber? // null)}}
         + (if $lane=="" then {} else {lane:$lane} end)
         + (if $wt=="" then {} else {worktree:$wt,branch:$wbr,base_sha:$wbase} end)' > "$jd/meta.json" 2>/dev/null || true
   fi
@@ -13136,6 +13138,24 @@ _status_line() {
   printf '%-22s %-8s %-6s %-16s %-12s %s\n' "$id" "$st" "$agetxt" "$model" "${acts:-—}$flag" "$prog"
 }
 
+# _job_progress_lines <log> [n] -> the text of the last n OSRC::PROGRESS markers, oldest first, one per
+# line, redacted (same rules as explain). In a JSON event stream the marker sits inside a string, so
+# the text stops at the first quote or backslash. Template lines from the injected protocol
+# ("<step> <5-10 words ...>") are dropped: their text opens with "<", a real update never does.
+_job_progress_lines() {
+  local n="${2:-10}"; case "$n" in ''|*[!0-9]*) n=10 ;; esac
+  grep -aoE 'OSRC::PROGRESS(#[A-Za-z0-9_-]+)?[[:space:]]+[^"\\]{1,200}' "$1" 2>/dev/null \
+    | sed -E 's/^OSRC::PROGRESS(#[A-Za-z0-9_-]+)?[[:space:]]+//; s/[[:space:]]+$//' \
+    | grep -v '^<' | _explain_redact | tail -n "$n"
+}
+
+# _job_observed_model <log> -> the model the lane itself reported, or nothing. Only claude-format
+# streams report it (the "init" system event); every other lane leaves observed_model null rather
+# than echoing the requested model back as if it had been observed.
+_job_observed_model() {
+  grep -a -m1 '"subtype":"init"' "$1" 2>/dev/null | jq -r '.model // empty' 2>/dev/null | head -1
+}
+
 # _job_json <id> [label] -> one job as a stable JSON object (orchestrator control plane, schema v1).
 # Built from the metadata that already exists on disk; unknown fields are null (never omitted).
 _job_json() {
@@ -13151,7 +13171,8 @@ _job_json() {
       '{schema_version:"1", job_id:$id, label:(if $lbl=="" then null else $lbl end),
         provider:null, verb:null, shape:null, model:null, tier:null, effort:null,
         status:$status, exit:null, started:$started, cwd:null,
-        progress:{last_marker:null, reads:0, writes:0, bash:0},
+        progress:{last_marker:null, line:null, history:[], reads:0, writes:0, bash:0},
+        observed_model:null, watchdog:null, worktree:null, verify:null,
         result_path:null, log_path:null, note:"no meta.json — launching/stillborn or pre-dispatch death"}'
     return 0
   fi
@@ -13166,17 +13187,30 @@ _job_json() {
   fi
   last="$(grep -aoE 'OSRC::(PROGRESS|PLAN|BLOCKED|NEED_INPUT|DONE)' "$L" 2>/dev/null | tail -1)"
   [ -s "$jd/last.txt" ] && rp="$jd/last.txt"
+  local hist obs wtj="null"
+  hist="$(_job_progress_lines "$L" "${OSRC_PROGRESS_HISTORY:-10}")"
+  obs="$(_job_observed_model "$L")"
+  [ -f "$jd/worktree.json" ] && wtj="$(jq -c '{path:(.path // null),branch:(.branch // null),base_sha:(.base_sha // null)}' "$jd/worktree.json" 2>/dev/null)"
+  [ -n "$wtj" ] || wtj="null"
   jq -n --slurpfile m "$jd/meta.json" \
     --arg status "$st" --argjson exit "${exitc:-null}" \
     --argjson reads "${r:-0}" --argjson writes "${w:-0}" --argjson bash "${b:-0}" \
     --arg last "$last" --arg lbl "$lbl" --arg result_path "$rp" --arg log_path "$L" \
+    --arg hist "$hist" --arg obs "$obs" --argjson wtj "$wtj" \
     '($m[0] // {}) as $me | {
        schema_version:"1", job_id:($me.id // null),
        label:(if $lbl=="" then ($me.label // null) else $lbl end),
        provider:($me.provider // null), verb:($me.verb // null), shape:($me.shape // null),
        model:($me.model // null), tier:($me.tier // null), effort:($me.effort // null),
        status:$status, exit:$exit, started:($me.started // null), cwd:($me.cwd // null),
-       progress:{last_marker:(if $last=="" then null else $last end), reads:$reads, writes:$writes, bash:$bash},
+       progress:{last_marker:(if $last=="" then null else $last end),
+                 line:(($hist | split("\n") | map(select(. != ""))) | last // null),
+                 history:($hist | split("\n") | map(select(. != ""))),
+                 reads:$reads, writes:$writes, bash:$bash},
+       observed_model:(if $obs=="" then null else $obs end),
+       watchdog:($me.watchdog // null),
+       worktree:(if $me.worktree then {path:$me.worktree, branch:($me.branch // null), base_sha:($me.base_sha // null)} else $wtj end),
+       verify:(if $me.check then {check:$me.check} else null end),
        result_path:(if $result_path=="" then null else $result_path end), log_path:$log_path
      }'
 }
@@ -13846,7 +13880,18 @@ cmd_result() {
 
 cmd_logs() {
   local id="${1:-}"; [ -n "$id" ] || die "logs needs a job id"
-  local n=60; [ "${2:-}" = "-n" ] && n="${3:-60}"
+  shift
+  # --masked runs the tail through the same redaction as explain, so a dashboard or a screen-share
+  # never shows a raw key. -n and --tail are the same option.
+  local n=60 masked=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -n|--tail) n="${2:-60}"; shift 2 2>/dev/null || shift ;;
+      --masked)  masked=1; shift ;;
+      *) die "logs: unknown argument '$1' (use -n|--tail N, --masked)" ;;
+    esac
+  done
+  case "$n" in ''|*[!0-9]*) die "logs: -n needs a number" ;; esac
   # Capture once and printf once: a double tail is a TOCTOU on a growing log (the dedup check
   # would see a different snapshot than what is printed). die fires on the capture if the log is
   # missing; rc stays 0 on a successful print.
@@ -13863,6 +13908,7 @@ cmd_logs() {
     esac
   fi
   shown="$(tail -n "$n" "$OSRC_JOBS/$id/out.log" 2>/dev/null)" || die "cannot read the log for $id (permissions?): $OSRC_JOBS/$id/out.log"
+  [ "$masked" = 1 ] && shown="$(printf '%s\n' "$shown" | _explain_redact)"
   printf '%s' "$shown"
   # Diagnostics-only (see cmd_result): append the recognizable TLS/proxy hint for a failed devin
   # job to STDERR when it is not already in the tailed log. `|| true` preserves the original
@@ -21134,11 +21180,76 @@ _loop_check() {
   return "$rc"
 }
 
+# _loop_meta <loop-dir> <key> -> one "key: value" field from the loop's meta file.
+_loop_meta() { sed -n "s/^$2: //p" "$1/meta" 2>/dev/null | head -1; }
+
+# _loop_status_json [loop-id] -> `loop status [id] --json`: every loop (or one) as data, schema v1.
+# Attempts come from the check-N.out files the loop already writes; an attempt passed only when the
+# loop's final state is success and it was the last attempt. first_failure is the same "fail|error|
+# assert" line the text view shows, redacted. Unknown values are null.
+_loop_status_json() {
+  local want="${1:-}" now items="[]" l lid st at started mx mm shape a cf ff passed atts rc
+  _json_need_jq "loop status"
+  now=$(date +%s)
+  if [ -n "$want" ]; then
+    case "$want" in *[!A-Za-z0-9_.-]*|.*) die "loop status: bad loop id '$want'" ;; esac
+    [ -d "$OSRC_HOME/loops/$want" ] || die "loop status: no loop named '$want'"
+  fi
+  for l in "$OSRC_HOME/loops"/*/; do
+    [ -d "$l" ] || continue
+    l="${l%/}"; lid="$(basename "$l")"
+    [ -z "$want" ] || [ "$lid" = "$want" ] || continue
+    st="$(cat "$l/state" 2>/dev/null)"
+    at="$(cat "$l/attempt" 2>/dev/null)"; case "$at" in ''|*[!0-9]*) at="" ;; esac
+    started="$(_loop_meta "$l" started)"; case "$started" in ''|*[!0-9]*) started="" ;; esac
+    mx="$(_loop_meta "$l" max)"; case "$mx" in ''|*[!0-9]*) mx="" ;; esac
+    mm="$(_loop_meta "$l" max-minutes)"; case "$mm" in ''|*[!0-9]*) mm="" ;; esac
+    shape="$(_loop_meta "$l" shape)"; [ -n "$shape" ] || shape=verify
+    atts="[]"
+    for cf in "$l"/check-*.out; do
+      [ -f "$cf" ] || continue
+      a="${cf##*/check-}"; a="${a%.out}"; case "$a" in ''|*[!0-9]*) continue ;; esac
+      ff="$(grep -aiE 'fail|error|assert' "$cf" 2>/dev/null | head -1 | cut -c1-200 | _explain_redact)"
+      passed=false; [ "$st" = success ] && [ "$a" = "$at" ] && passed=true
+      atts="$(jq -c --argjson n "$a" --argjson p "$passed" --arg ff "$ff" \
+        '. + [{n:$n, passed:$p, first_failure:(if $ff=="" then null else $ff end)}]' <<<"$atts")" || return 1
+    done
+    rc="[]"
+    if [ -f "$l/receipts.tsv" ]; then
+      rc="$(jq -Rsc 'split("\n") | map(select(. != "") | split("\t")
+            | {attempt:(.[0]|tonumber? // null), rung:(.[1]|tonumber? // null), model:(.[2] // null),
+               tier:(.[3] // null), lane:(.[4] // null), result:(.[5] // null), elapsed_s:(.[6]|tonumber? // null)})' \
+            < "$l/receipts.tsv" 2>/dev/null)" || rc="[]"
+    fi
+    items="$(jq -c --arg id "$lid" --arg st "$st" --arg at "$at" --arg started "$started" --argjson now "$now" \
+      --arg mx "$mx" --arg mm "$mm" --arg shape "$shape" \
+      --arg task "$(_loop_meta "$l" task | _explain_redact)" --arg check "$(_loop_meta "$l" check | _explain_redact)" \
+      --arg model "$(_loop_meta "$l" model)" --arg verb "$(_loop_meta "$l" verb)" \
+      --arg wt "$(_loop_meta "$l" worktree)" \
+      --arg lf "$(head -1 "$l/last_fail" 2>/dev/null | cut -c1-200 | _explain_redact)" \
+      --argjson atts "$(jq -c 'sort_by(.n)' <<<"$atts")" --argjson rc "$rc" '
+      def num: if . == "" then null else tonumber end;
+      def str: if . == "" or . == "<default>" then null else . end;
+      . + [{loop_id:$id, shape:$shape, state:($st|str), task:($task|str), check:($check|str),
+            model:($model|str), verb:($verb|str), worktree:($wt == "1"),
+            started:($started|num),
+            elapsed_s:(if $started == "" then null else ($now - ($started|tonumber)) end),
+            attempt:($at|num), last_failure:($lf|str),
+            stop_rules:{max_attempts:($mx|num), max_minutes:($mm|num), same_failure_guard:($shape == "verify")},
+            attempts:$atts, receipts:$rc}]' <<<"$items")" || return 1
+  done
+  jq -cn --argjson loops "$items" '{schema_version:"1", loops:$loops}'
+}
+
 cmd_loop() {
   local shape="${1:-}"; [ $# -gt 0 ] && shift
   local resume=0 lid="" ldir=""
   case "$shape" in
     status)
+      if [ "${1:-}" = "--json" ] || [ "${2:-}" = "--json" ]; then
+        local _want=""; [ "${1:-}" = "--json" ] || _want="${1:-}"
+        _loop_status_json "$_want"; return $?
+      fi
       # What anyone needs mid-run: is it moving, how far in, and what is still wrong.
       local _l _st _at _mx _el _lf _now; _now=$(date +%s)
       [ -d "$OSRC_HOME/loops" ] || { echo "no loops yet"; return 0; }

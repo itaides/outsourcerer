@@ -330,6 +330,15 @@ The plain-text output of every command is unchanged.
 | `exclude ls --json` | `entries[]` (`entry`, `source`: `saved` or `env`), `invalid[]` |
 | `limits status --json` | `caps[]` (`key`, `lane`, `model`, `per_day`, `reset`, `used_today`) |
 | `heartbeat status --json` | `armed`, `pid` (exit code is still 1 when nothing is armed) |
+| `loop status [id] --json` | `loops[]` (`loop_id`, `shape`, `state`, `task`, `check`, `model`, `verb`, `worktree`, `started`, `elapsed_s`, `attempt`, `last_failure`, `stop_rules` (`max_attempts`, `max_minutes`, `same_failure_guard`), `attempts[]` (`n`, `passed`, `first_failure`), `receipts[]` for escalate loops). Task, check and failure text are redacted. |
+
+`status --json` also carries the run detail a dashboard drawer needs: `progress.line` and
+`progress.history[]` (the text of the latest and last 10 `OSRC::PROGRESS` markers, redacted),
+`observed_model` (what the lane reported, only claude-format streams report it, otherwise `null`),
+`watchdog` (`warn_s`, `stall_s`, `hard_s`; `null` for jobs launched before this field existed),
+`worktree` (`path`, `branch`, `base_sha`) and `verify` (`null` when no check is recorded for the job,
+so it finishes unverified). `logs <id> --masked [--tail N]` prints the log tail through the same
+redaction as `explain`.
 
 `status --json`, `fleet ls --json`, `fanout status --json`, `classify --json`, `advise --json` and the
 factory `plan`/`task` `--json` forms are documented with their commands.
