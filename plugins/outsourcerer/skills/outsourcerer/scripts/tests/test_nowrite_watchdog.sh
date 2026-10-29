@@ -41,11 +41,14 @@ sup() { # <jd> <verb> <n> <w> <s> [env...]  -> runs _supervise with wide silence
     _supervise "$1" 30 60 120 -- sh -c "$2" _ "$3" "$4" "$5" "$1" "$6"' "$SRC" "$jd" "$STREAM" "$n" "$w" "$s" "$TMP/w-$(basename "$jd")" >/dev/null 2>"$jd/sup.err"
 }
 
-# 1. edit verb, streams 8s, never writes, OSRC_NOPROGRESS_SECS=3, no kill knob -> flagged mid-flight, survives.
-jd=$(mk c1 edit dv); sup "$jd" edit 8 0 6 OSRC_NOPROGRESS_SECS=3
-[ "$(wit "$jd" 6)" = "no-progress-writes" ] && ok "edit+writeless past OSRC_NOPROGRESS_SECS -> state no-progress-writes while alive and streaming" \
-  || bad "edit+writeless: witness@6='$(wit "$jd" 6)' (want no-progress-writes)"
-[ "$(wit "$jd" 2)" = "running" ] && ok "edit+writeless: still running BEFORE the threshold" || bad "edit+writeless: witness@2='$(wit "$jd" 2)'"
+# 1. edit verb, streams 8s, never writes, OSRC_NOPROGRESS_SECS=4, no kill knob -> flagged mid-flight, survives.
+# The age is whole seconds from the supervisor's start, and a loaded runner stretches each `sleep 1` and the
+# child's start-up, so the "before" witness sits at second 1 and the threshold at 4: at least ~2 s of margin on
+# both sides (it was witness@2 against 3 s, which a busy CI Mac crossed).
+jd=$(mk c1 edit dv); sup "$jd" edit 8 0 6 OSRC_NOPROGRESS_SECS=4
+[ "$(wit "$jd" 7)" = "no-progress-writes" ] && ok "edit+writeless past OSRC_NOPROGRESS_SECS -> state no-progress-writes while alive and streaming" \
+  || bad "edit+writeless: witness@7='$(wit "$jd" 7)' (want no-progress-writes)"
+[ "$(wit "$jd" 1)" = "running" ] && ok "edit+writeless: still running BEFORE the threshold" || bad "edit+writeless: witness@1='$(wit "$jd" 1)'"
 grep -q 'Not killing it' "$jd/sup.err" && ok "default is SURFACE-ONLY: the WARN says it is not killing" || bad "surface-only WARN missing"
 case "$(cat "$jd/status")" in wedged|timeout) bad "job was KILLED without OSRC_NOPROGRESS_KILL_SECS (status=$(cat "$jd/status"))" ;; *) ok "job not killed by default (final status: $(cat "$jd/status"))" ;; esac
 [ -s "$jd/nowrite_age" ] && ok "no-write age recorded for status rendering ($(cat "$jd/nowrite_age")s)" || bad "nowrite_age not recorded"
