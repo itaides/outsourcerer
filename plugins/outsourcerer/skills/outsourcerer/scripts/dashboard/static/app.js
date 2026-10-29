@@ -147,12 +147,23 @@ async function refresh() {
   // you just left must not land on top of the one you switched to.
   try {
     await Promise.all([chrome(), scr.render(off)]);
-    if (current === name) put($("view"), [...off.childNodes]);
+    if (current === name) { put($("view"), [...off.childNodes]); labelTables($("view")); }
   } catch (e) { if (current === name) put($("view"), h("div", { class: "err" }, "Could not load: " + e.message)); }
   if (current === name) timer = setTimeout(refresh, (scr.every || 10) * 1000);
 }
 window.addEventListener("hashchange", route);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+
+// Give each data cell its column name, so on a phone a table row can stack into a labelled card.
+// Tables whose rows are single-purpose lists (no header row) are left as they are.
+function labelTables(root) {
+  root.querySelectorAll(".tbl table").forEach((t) => {
+    const heads = [...t.querySelectorAll("thead th")].map((th) => th.textContent.trim());
+    if (heads.length < 3) return;
+    t.classList.add("stackable");
+    t.querySelectorAll("tbody tr").forEach((tr) => [...tr.children].forEach((td, i) => { td.dataset.label = i === 0 ? "" : (heads[i] || ""); }));
+  });
+}
 
 // ---- shared bits -------------------------------------------------------------------------------------------
 const PERM = { run: "read-only", explore: "read-only", research: "sandboxed", edit: "edits", yolo: "yolo" };
@@ -200,7 +211,7 @@ SCREENS.needs = { every: 6, async render(v) {
   if (failed(d.inbox)) return put(v, errBox("inbox", d.inbox));
   const ib = d.inbox, live = failed(d.status) ? 0 : d.status.jobs.filter(isLive).length;
   const head = h("div", { class: "head" }, h("div", {}, h("h1", {}, "Needs you"),
-    h("p", { class: "sub" }, ib.counts.items ? `${ib.counts.items} items · ${ib.counts.red} blocking work` : "All clear")));
+    h("p", { class: "sub" }, ib.counts.items ? `${ib.counts.items} item${ib.counts.items === 1 ? "" : "s"} · ${ib.counts.red} blocking work` : "All clear")));
   let body;
   if (!ib.items.length) {
     body = h("div", { class: "card empty" }, h("div", { class: "big" }, "🧙"), h("h2", {}, "Nothing needs you."),
@@ -436,7 +447,7 @@ SCREENS.outcomes = { every: 60, async render(v) {
   const classes = [...new Set(o.matrix.map((m) => m.task_class || "?"))].sort();
   const rowsKey = [...new Set(o.matrix.map((m) => `${m.lane || "?"}\u001f${m.model || "?"}`))];
   const cellOf = (rk, c) => o.matrix.find((m) => `${m.lane || "?"}\u001f${m.model || "?"}` === rk && (m.task_class || "?") === c);
-  const grid = h("div", { class: "heat", style: `grid-template-columns: minmax(140px, 220px) repeat(${classes.length}, minmax(96px, 1fr))` },
+  const grid = h("div", { class: "heat", style: `grid-template-columns: minmax(88px, 220px) repeat(${classes.length}, minmax(78px, 1fr))` },
     h("span", {}), classes.map((c) => h("span", { class: "hl" }, c)),
     rowsKey.map((rk) => [h("span", { class: "hl mono", title: rk.replace("\u001f", " · ") }, rk.replace("\u001f", " · ")),
       classes.map((c) => {
