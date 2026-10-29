@@ -338,6 +338,7 @@ The plain-text output of every command is unchanged.
 | `flow ls --json` | `flows[]` (`name`, `source`: `built-in` or `yours`, `description`, `vars[]`, `stages`) |
 | `land queue --json` | `merging[]` (`lock`, `holder`, `pid`), `waiting[]` (ship tasks done but not landed, oldest first: `plan`, `task`, `title`, `repo`, `into`, `branch`, `done_at`, `check` (`cmd`, `rc`) or null, `verdict`, `land_error`) |
 | `outcomes [--days N] --json` | `days`, `totals` (`n`, `passed`, `completed_unverified`, `failed`, `reverted`, `blocked`, `abandoned`, `unknown`), `verified_rate_pct`, `checked_runs`, `matrix[]` (`lane`, `model`, `task_class`, `n`, `done_pct`, `verified_pct`, `blocked_pct`, `counts`, `blocked_reasons[]`), `trend[]` (`week_start`, `n`, `passed`, `verified_rate_pct`) |
+| `fanout list --json` | `groups[]` (newest `OSRC_FANOUT_LIST_MAX`, default 20: `fanout_id`, `manifest`, `summary` with `total`, `running`, `done`, `blocked`, `failed`) |
 | `loop status [id] --json` | `loops[]` (`loop_id`, `shape`, `state`, `task`, `check`, `model`, `verb`, `worktree`, `started`, `elapsed_s`, `attempt`, `last_failure`, `stop_rules` (`max_attempts`, `max_minutes`, `same_failure_guard`), `attempts[]` (`n`, `passed`, `first_failure`), `receipts[]` for escalate loops). Task, check and failure text are redacted. |
 
 `status --json` also carries the run detail a dashboard drawer needs: `progress.line` and
@@ -370,11 +371,11 @@ its sign-in URL; `--print-url` prints the URL and exits. It needs `python3` (sta
 - **Actions behind one door.** `POST /api/run` with `{"argv": [...]}` runs one action, only when the argv
   matches a fixed shape: `task release <tN> --plan <p> --answer <text>`, `cancel|watch|explain|result
   <job>`, `fleet show <session>`, `heartbeat start`, `mode auto|hybrid|manual`, `exclude add|rm <model>`,
-  `consent grant|revoke`, `tap install`. Values are validated (ids, model names that cannot start with
+  `consent grant|revoke`, `tap install`, `posture reset`. Values are validated (ids, model names that cannot start with
   `-`, answers up to 2000 characters) and passed as argv elements, never through a shell. The request
   also needs the `X-Osrc-Dash: 1` header and a JSON content type, which a cross-site form cannot send.
   The output is redacted with the same patterns as `explain`, and the read cache is cleared. The page
-  asks for a second click before cancel and consent revoke. Anything else is a 403.
+  asks for a second click before cancel, consent revoke and posture reset. Anything else is a 403.
 - **Short cache.** Each endpoint caches its last good answer for a few seconds (inbox 5s, doctor 120s),
   so a page left open does not re-run the fleet scan on every poll.
 - **Strict CSP**, `nosniff`, `no-referrer`, `no-store`. The page loads nothing from the network, and the

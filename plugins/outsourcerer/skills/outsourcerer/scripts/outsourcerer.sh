@@ -14708,6 +14708,21 @@ _fanout_collect() {
 }
 
 _fanout_list() {
+  if [ "${1:-}" = "--json" ]; then
+    # The newest OSRC_FANOUT_LIST_MAX groups (default 20), each with its manifest line and the same
+    # summary counts `fanout status <gid> --json` reports (members are not repeated here).
+    _json_need_jq "fanout list"
+    local items="[]" g one
+    if [ -d "$OSRC_HOME/fanout" ]; then
+      while IFS= read -r g; do
+        g="${g%/}"; g="$(basename "$g")"; [ -n "$g" ] || continue
+        one="$(_fanout_status "$g" --json 2>/dev/null)" || continue
+        items="$(jq -c --argjson o "$one" --arg m "$(head -1 "$OSRC_HOME/fanout/$g/manifest.txt" 2>/dev/null | _explain_redact)" \
+          '. + [{fanout_id:$o.fanout_id, manifest:(if $m == "" then null else $m end), summary:$o.summary}]' <<<"$items" 2>/dev/null)" || return 1
+      done < <(ls -1td "$OSRC_HOME/fanout"/*/ 2>/dev/null | head -n "${OSRC_FANOUT_LIST_MAX:-20}")
+    fi
+    jq -cn --argjson g "$items" '{schema_version:"1", groups:$g}'; return 0
+  fi
   [ -d "$OSRC_HOME/fanout" ] || { echo "no fanout groups yet."; return 0; }
   local d gid
   for d in "$OSRC_HOME/fanout"/*/; do

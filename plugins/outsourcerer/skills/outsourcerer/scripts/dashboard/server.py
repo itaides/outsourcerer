@@ -89,6 +89,8 @@ ENDPOINTS = {
     "flows":      (_fixed("flow", "ls", "--json"), 300, "json"),
     "land-queue": (_fixed("land", "queue", "--json"), 10, "json"),
     "loops":      (_fixed("loop", "status", "--json"), 5, "json"),
+    "fanouts":    (_fixed("fanout", "list", "--json"), 10, "json"),
+    "fanout":     (_with_id("fanout", "status", after=("--json",)), 5, "json"),
     "loop":       (_with_id("loop", "status", after=("--json",)), 5, "json"),
     "job":        (_with_id("status", after=("--json",)), 3, "json"),
     "explain":    (_with_id("explain", after=("--json",)), 10, "json"),
@@ -120,6 +122,7 @@ ACTIONS = [
     ["exclude", "add", "{model}"], ["exclude", "rm", "{model}"],
     ["consent", "grant"], ["consent", "revoke"],
     ["tap", "install"],
+    ["posture", "reset"],
 ]
 ACTION_TIMEOUT = int(os.environ.get("OSRC_DASH_ACTION_TIMEOUT", "60"))
 

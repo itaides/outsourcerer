@@ -46,7 +46,9 @@ async function copy(text) {
 
 // Run one allow-listed action through the server (POST /api/run). Destructive ones ask for a second
 // click on the same button instead of a browser dialog.
-const DESTRUCTIVE = (argv) => argv[1] === "cancel" || (argv[1] === "consent" && argv[2] === "revoke");
+const DESTRUCTIVE = (argv) => argv[1] === "cancel" || (argv[1] === "consent" && argv[2] === "revoke") || (argv[1] === "posture" && argv[2] === "reset");
+// Actions that only read: their output is the point, so it opens in the drawer instead of a toast.
+const READS = (argv) => ["explain", "result", "watch"].includes(argv[1]) || (argv[1] === "fleet" && argv[2] === "show");
 async function runAction(argv, btn) {
   if (btn && DESTRUCTIVE(argv) && btn.dataset.armed !== "1") {
     btn.dataset.armed = "1"; btn.dataset.label = btn.textContent; btn.textContent = "Click again to confirm";
@@ -62,12 +64,18 @@ async function runAction(argv, btn) {
     const first = (res.ok ? res.stdout : res.stderr || res.stdout || "").trim().split("\n").filter(Boolean).slice(-1)[0] || "";
     toast((res.ok ? "Done: " : `Failed (exit ${res.exit}): `) + cmdline(argv) + (first ? " · " + first.slice(0, 160) : ""));
     lastRun = res;
-    refresh();
+    if (READS(argv)) showOutput(cmdline(argv), res); else refresh();
     return res;
   } catch (e) { toast("Could not run: " + e.message); return null; }
   finally { if (btn) { btn.disabled = false; if (btn.dataset.label) btn.textContent = btn.dataset.label; } }
 }
 let lastRun = null;
+function showOutput(title, res) {
+  drawerFor = null;
+  drawerShell(title, res.ok ? "exit 0" : `exit ${res.exit}`,
+    h("div", { class: "log" }, (res.stdout || "").trim() || "(no output)"),
+    (res.stderr || "").trim() ? h("details", {}, h("summary", { class: "muted" }, "stderr"), h("div", { class: "log" }, res.stderr.trim())) : null);
+}
 const runBtn = (label, argv, cls = "btn small") => h("button", { class: cls, type: "button", title: cmdline(argv),
   onclick: (e) => runAction(argv, e.currentTarget) }, label);
 const copyBtn = (argv) => h("button", { class: "ghost small", type: "button", "aria-label": "Copy command", title: "Copy: " + cmdline(argv),
@@ -221,7 +229,7 @@ SCREENS.needs = { every: 6, async render(v) {
 // ---- 2 · Live ---------------------------------------------------------------------------------------------------
 let liveTab = "live";
 SCREENS.live = { every: 5, async render(v) {
-  const d = await many(["status", "inbox", "loops"]);
+  const d = await many(["status", "inbox", "loops", "fleet", "fanouts"]);
   if (failed(d.status)) return put(v, errBox("status", d.status));
   const needIds = new Set(failed(d.inbox) ? [] : d.inbox.items.map((i) => i.refs && i.refs.job_id).filter(Boolean));
   const jobs = d.status.jobs;
@@ -262,8 +270,38 @@ SCREENS.live = { every: 5, async render(v) {
         h("td", {}, h("div", { class: "trunc" }, nz(l.task)), h("div", { class: "mono faint" }, l.loop_id)),
         h("td", {}, nz(l.state)), h("td", { class: "mono" }, `${nz(l.attempt)}/${nz(l.stop_rules.max_attempts, "∞")}`),
         h("td", { class: "mono" }, ago(l.elapsed_s)), h("td", {}, h("div", { class: "trunc mono small" }, nz(l.last_failure))))))))) : null;
+  // Sessions: everything the fleet sees except this session and the managed mirrors of jobs above.
+  const needSess = new Set(failed(d.inbox) ? [] : d.inbox.items.map((i) => i.refs && i.refs.session_id).filter(Boolean));
+  const liveState = (x) => !["ended", "dead", "completed", "idle", "unknown"].includes(x.state);
+  const sessAll = failed(d.fleet) ? [] : (d.fleet.items || []).filter((x) => x.owner !== "managed" && (x.self || 0) === 0);
+  const sessFilter = { live: (x) => liveState(x) || needSess.has(x.session_id), needs: (x) => needSess.has(x.session_id),
+    running: liveState, done: (x) => !liveState(x) && !needSess.has(x.session_id) };
+  const sess = sessAll.filter(sessFilter[liveTab]);
+  const sessCard = failed(d.fleet) ? errBox("fleet", d.fleet) : sess.length ? h("section", { class: "card", style: "margin-top:16px" },
+    h("div", { class: "pad" }, h("h2", {}, `Sessions (${sess.length})`), h("p", { class: "faint small" }, "Claude Code peers and steerable sessions the fleet sees. Click one to read its tail.")),
+    h("div", { class: "tbl" }, h("table", {}, h("thead", {}, h("tr", {}, ["Session", "Harness", "Model (requested → observed)", "State", "Last activity", "Repo"].map((c) => h("th", {}, c)))),
+      h("tbody", {}, sess.map((x) => h("tr", { class: "click", tabindex: 0,
+        onclick: () => runAction(["outsourcerer", "fleet", "show", x.session_id]), onkeydown: (e) => { if (e.key === "Enter") runAction(["outsourcerer", "fleet", "show", x.session_id]); } },
+        h("td", {}, h("div", { class: "trunc" }, nz(x.display_name || x.task_summary, x.session_id)), h("div", { class: "mono faint" }, nz(x.session_id)),
+          needSess.has(x.session_id) ? h("span", { class: "kind" }, "needs you") : null),
+        h("td", {}, h("span", { class: "chip" }, nz(x.lane || x.harness))),
+        h("td", {}, modelCell(x.requested_model, x.observed_model)),
+        h("td", { class: x.state === "blocked" ? "red" : (x.state === "blocked?" || x.state === "unresponsive?") ? "amber" : "" }, nz(x.state_label || x.state)),
+        h("td", { class: "mono" }, x.status_age !== null && x.status_age !== undefined ? ago(x.status_age) + " ago" : "—"),
+        h("td", {}, nz(repoOf(x.cwd))))))))) : null;
+  // Groups: fanout / crew runs, one row each with their summary counts.
+  const groups = failed(d.fanouts) ? [] : d.fanouts.groups.filter((g) => {
+    const run = g.summary && g.summary.running > 0;
+    return liveTab === "done" ? !run : liveTab === "needs" ? (g.summary && g.summary.blocked > 0) : (liveTab === "running" ? run : run || (g.summary && g.summary.blocked > 0));
+  });
+  const groupCard = groups.length ? h("section", { class: "card", style: "margin-top:16px" }, h("div", { class: "pad" }, h("h2", {}, "Groups (fanout / crew)")),
+    h("div", { class: "tbl" }, h("table", {}, h("thead", {}, h("tr", {}, ["Group", "Members", "Running", "Done", "Blocked", "Failed"].map((c) => h("th", {}, c)))),
+      h("tbody", {}, groups.map((g) => h("tr", { class: "click", tabindex: 0, onclick: () => openGroup(g.fanout_id) },
+        h("td", {}, h("div", { class: "trunc mono small" }, nz(g.manifest, "")), h("div", { class: "mono faint" }, g.fanout_id)),
+        ...["total", "running", "done", "blocked", "failed"].map((k) => h("td", { class: "mono" + (k === "blocked" && g.summary[k] ? " amber" : k === "failed" && g.summary[k] ? " red" : "") }, nz(g.summary[k], 0))))))))) : null;
   put(v, h("div", { class: "head" }, h("div", {}, h("h1", {}, "Live runs"),
-    h("p", { class: "sub" }, `${jobs.filter(isLive).length} running · ${needIds.size} need you · ${d.status.omitted || 0} older not shown`))), tabs, table, loopCard);
+    h("p", { class: "sub" }, `${jobs.filter(isLive).length} jobs running · ${sessAll.filter(liveState).length} sessions active · ${needIds.size + needSess.size} need you · ${d.status.omitted || 0} older jobs not shown`))),
+    tabs, table, sessCard, groupCard, loopCard);
   if (drawerFor) openJob(drawerFor, true);
 } };
 
@@ -308,12 +346,20 @@ async function openJob(id, quiet) {
     h("div", { style: "display:flex;gap:8px;flex-wrap:wrap" },
       !terminal ? runBtn("Watch", ["outsourcerer", "watch", id]) : null,
       !terminal ? runBtn("Cancel", ["outsourcerer", "cancel", id]) : null,
-      h("button", { class: "btn small", type: "button", onclick: async (e) => {
-        const r = await runAction(["outsourcerer", "result", id], e.currentTarget);
-        if (r && r.stdout !== undefined) { const box = $("drawer").querySelector(".result-box"); if (box) { box.hidden = false; box.textContent = r.stdout || "(empty)"; } }
-      } }, "Show result"),
-      copyBtn(["outsourcerer", "result", id])),
-    h("div", { class: "log result-box", hidden: true }));
+      runBtn("Show result", ["outsourcerer", "result", id]),
+      copyBtn(["outsourcerer", "result", id])));
+}
+async function openGroup(gid) {
+  drawerFor = null;
+  const d = await many([`fanout/${gid}`]);
+  const g = d[`fanout/${gid}`];
+  if (failed(g)) return drawerShell("Group " + gid, null, errBox("fanout status", g));
+  const sm = g.summary;
+  drawerShell("Group " + gid, `${sm.total} members · ${sm.running} running · ${sm.done} done · ${sm.blocked} blocked · ${sm.failed} failed`,
+    h("div", { class: "rows" }, (g.jobs || []).map((j) => h("button", { type: "button", class: "row", style: "border:0;border-bottom:1px solid var(--bd);background:transparent;text-align:left;cursor:pointer;padding-left:0",
+      onclick: () => openJob(j.job_id) },
+      h("div", { class: "body" }, h("span", { class: "title" }, nz(j.label, j.job_id)), h("span", { class: "muted small" }, `${j.status} · `, modelCell(j.model, j.observed_model)),
+        h("span", { class: "mono faint small" }, nz(j.progress && j.progress.line, "")))))));
 }
 async function openLoop(l) {
   drawerFor = null;
@@ -536,7 +582,7 @@ SCREENS.delegate = { every: 3600, async render(v) {
 
 // ---- 7 · Lanes ------------------------------------------------------------------------------------------------------
 SCREENS.lanes = { every: 120, async render(v) {
-  const d = await many(["doctor", "exclude", "limits", "tab"]);
+  const d = await many(["doctor", "exclude", "limits", "posture"]);
   if (failed(d.doctor)) return put(v, errBox("doctor", d.doctor));
   const doc = d.doctor;
   $("b-lanes").textContent = `${doc.summary.ready}/${doc.summary.lanes}`;
@@ -557,8 +603,12 @@ SCREENS.lanes = { every: 120, async render(v) {
     d.limits.caps.length ? d.limits.caps.map((c) => { const p = c.per_day ? Math.min(100, Math.round((100 * (c.used_today || 0)) / c.per_day)) : 0;
       return h("div", { class: "stack", style: "gap:4px" }, h("div", { style: "display:flex;justify-content:space-between" }, h("span", { class: "mono" }, `${c.lane} ${c.model}`), h("span", { class: "mono" }, `${c.used_today || 0} / ${c.per_day}`)),
         h("div", { class: "bar" }, h("i", { class: p >= 90 ? "red" : p >= 70 ? "amber" : "", style: `width:${p}%` }))); }) : h("p", { class: "muted" }, "No caps set."));
+  const post = failed(d.posture) ? errBox("posture", d.posture) : h("section", { class: "card pad stack", style: "gap:8px" }, h("h2", {}, "Remembered postures"),
+    h("p", { class: "faint small" }, "What a lane refused before (org policy, a lane-down mark). The next restricted attempt is re-probed after a reset."),
+    d.posture.postures.length ? [d.posture.postures.map((p) => h("div", { class: "mono small" }, `${p.lane}.${p.key} = ${p.value}`)),
+      h("div", {}, runBtn("Reset postures", ["outsourcerer", "posture", "reset"]))] : h("p", { class: "muted" }, "Nothing remembered."));
   put(v, h("div", { class: "head" }, h("div", {}, h("h1", {}, "Lanes"), h("p", { class: "sub" }, `${doc.summary.ready} of ${doc.summary.lanes} ready · ${doc.summary.down} down`))),
-    h("div", { class: "cols" }, h("div", { class: "wide" }, table), h("div", { class: "side stack" }, ex, caps)));
+    h("div", { class: "cols" }, h("div", { class: "wide" }, table), h("div", { class: "side stack" }, ex, caps, post)));
 } };
 
 // ---- 8 · Settings ---------------------------------------------------------------------------------------------------

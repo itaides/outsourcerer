@@ -95,6 +95,18 @@ printf 'OSRC::PROGRESS 1/1 token=abcd1234efgh5678\nOSRC::DONE\n' > "$jd/out.log"
 [ "$(code "${A[@]}" "$B/api/logs/j-dash")" = 200 ] && ! grep -q 'abcd1234efgh5678' "$TMP/body" && ok "GET /api/logs/<id> is the masked tail" || bad "logs endpoint leaked or failed: $(cat "$TMP/body")"
 [ "$(code "${A[@]}" "$B/api/job/no-such-job")" != 200 ] && ok "an unknown job is not a 200" || bad "unknown job returned 200"
 
+# a plan and a fanout group the CLI knows, through their endpoints
+mkdir -p "$OSRC_HOME/plans/alpha/tasks" "$OSRC_HOME/fanout/g-1"
+printf '{"schema":1,"name":"alpha","goal":"ship it","repo":"","base_branch":""}\n' > "$OSRC_HOME/plans/alpha/plan.json"
+printf '{"id":"t1","title":"scout","state":"todo","shape":"scout","deps":[]}\n' > "$OSRC_HOME/plans/alpha/tasks/t1.json"
+: > "$OSRC_HOME/plans/alpha/events.jsonl"
+printf 'j-dash\tfirst\n' > "$OSRC_HOME/fanout/g-1/members.tsv"; printf 'codex run 1 agents\n' > "$OSRC_HOME/fanout/g-1/manifest.txt"
+[ "$(code "${A[@]}" "$B/api/plans")" = 200 ] && jq -e '.plans[0].name == "alpha"' "$TMP/body" >/dev/null && ok "GET /api/plans lists plans" || bad "plans: $(cat "$TMP/body")"
+[ "$(code "${A[@]}" "$B/api/plan/alpha")" = 200 ] && jq -e '.plan.name == "alpha" and (.tasks | length) == 1' "$TMP/body" >/dev/null && ok "GET /api/plan/<name> is plan show <name> --json" || bad "plan: $(cat "$TMP/body")"
+[ "$(code "${A[@]}" "$B/api/fanouts")" = 200 ] && jq -e '.groups[0].fanout_id == "g-1" and .groups[0].summary.total == 1 and .groups[0].manifest == "codex run 1 agents"' "$TMP/body" >/dev/null \
+  && ok "GET /api/fanouts is fanout list --json" || bad "fanouts: $(cat "$TMP/body")"
+[ "$(code "${A[@]}" "$B/api/fanout/g-1")" = 200 ] && jq -e '.fanout_id == "g-1" and .jobs[0].job_id == "j-dash"' "$TMP/body" >/dev/null && ok "GET /api/fanout/<id> is fanout status <id> --json" || bad "fanout: $(cat "$TMP/body")"
+
 # methods and static files
 [ "$(code -X POST "${A[@]}" "$B/api/mode")" = 403 ] && ok "a bare POST is refused (actions live behind POST /api/run)" || bad "POST not refused"
 [ "$(code -X DELETE "${A[@]}" "$B/api/mode")" = 405 ] && ok "DELETE -> 405" || bad "DELETE not refused"
