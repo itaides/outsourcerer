@@ -46,6 +46,7 @@ _ALL_SUITES="test_cloud_gate test_no_silent_escalation test_hardening test_escal
 _ALL_SUITES="$_ALL_SUITES test_reverdict_residuals"
 _ALL_SUITES="$_ALL_SUITES test_json_output"
 _ALL_SUITES="$_ALL_SUITES test_run_detail"
+_ALL_SUITES="$_ALL_SUITES test_outcomes"
 _ALL_SUITES="$_ALL_SUITES test_session_effort"
 _ALL_SUITES="$_ALL_SUITES test_model_selection_parity"
 _ALL_SUITES="$_ALL_SUITES test_heartbeat_human"
