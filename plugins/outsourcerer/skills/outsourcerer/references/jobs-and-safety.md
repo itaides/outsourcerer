@@ -350,3 +350,27 @@ redaction as `explain`.
 
 `status --json`, `fleet ls --json`, `fanout status --json`, `classify --json`, `advise --json` and the
 factory `plan`/`task` `--json` forms are documented with their commands.
+
+## Dashboard (`outsourcerer dash`)
+
+`outsourcerer dash [--port N]` serves a local dashboard in the foreground (Ctrl-C stops it) and prints
+its sign-in URL; `--print-url` prints the URL and exits. It needs `python3` (standard library only) and
+`jq`. Every panel is a renderer over the `--json` commands above; the page holds no logic of its own.
+
+- **Loopback only.** It binds to 127.0.0.1; any other `--host` is refused at start.
+- **Token on every request.** `<state home>/dash/token` (mode 0600, directory 0700) is created on the
+  first start and kept across restarts. Send it as `Authorization: Bearer <token>`, or open the printed
+  `/?token=` URL once: that sets an HttpOnly, SameSite=Strict cookie and redirects so the token leaves
+  the address bar. Delete the file to rotate it.
+- **Host check.** Requests whose Host header is not `127.0.0.1:<port>` or `localhost:<port>` get 403, so a
+  page on another site cannot reach the server through a DNS name that points at 127.0.0.1.
+- **Allow-list, no shell.** `GET /api/<name>[/<id>]` maps to one fixed argv (for example `inbox` ->
+  `inbox --json`, `job/<id>` -> `status <id> --json`, `logs/<id>` -> `logs <id> --masked --tail 40`).
+  Ids must match `[A-Za-z0-9][A-Za-z0-9_.-]*`. An unknown name is a 404 that lists the allow-list.
+- **Read-only.** Only GET and HEAD. Action buttons copy the exact command for you to run.
+- **Short cache.** Each endpoint caches its last good answer for a few seconds (inbox 5s, doctor 120s),
+  so a page left open does not re-run the fleet scan on every poll.
+- **Strict CSP**, `nosniff`, `no-referrer`, `no-store`. The page loads nothing from the network, and the
+  request log never prints a query string. It can be framed by another page on 127.0.0.1 or localhost
+  (CCC's rail), not by any other site.
+

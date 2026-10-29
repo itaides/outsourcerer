@@ -51,6 +51,7 @@
 #   explain <job-id>               Diagnose a job's terminal state: state + persisted reason +
 #                                  last OSRC:: marker + the _classify_job routing verdict. Degrades
 #                                  gracefully (missing jq/meta/reason -> "(not recorded)").
+#   dash [--port N] [--print-url]  Local dashboard on 127.0.0.1:8091 (token in ~/.outsourcerer/dash/token).
 #   inbox [--json]                 What needs you now: blocked/waiting sessions and jobs, held decisions,
 #                                  model drift, undelivered messages. One row each, one action each.
 #   outcomes [--days N] [--json]   What delegated work achieved (default 90 days): verified rate
@@ -9405,6 +9406,19 @@ _inbox_inputs() {
   jq -cn --argjson now "$now" --argjson win "${OSRC_INBOX_WINDOW_S:-86400}" --argjson s "$sessions" \
     --argjson j "$jobs" --argjson t "$tasks" --argjson o "$obl" \
     '{now:$now, window_s:$win, sessions:$s, jobs:$j, tasks:$t, obligations:$o}'
+}
+
+# cmd_dash [--port N] [--print-url] -> serve the local dashboard (scripts/dashboard/server.py) in the
+# foreground on 127.0.0.1. It only runs allow-listed `--json` commands of THIS script, needs the token
+# in $OSRC_HOME/dash/token (created 0600 on first start), and prints the sign-in URL. Ctrl-C stops it.
+cmd_dash() {
+  local srv; srv="$(dirname "$SCRIPT_PATH")/dashboard/server.py"
+  [ -f "$srv" ] || die "dash: the dashboard is missing from this install ($srv)"
+  have python3 || die "dash needs python3 (standard library only)"
+  have jq || die "dash needs jq (every panel reads a --json command)"
+  _mkdir_private "$OSRC_HOME" || die "dash: cannot create $OSRC_HOME"
+  local cli; cli="$(cd "$(dirname "$SCRIPT_PATH")" && pwd -P)/$(basename "$SCRIPT_PATH")"
+  exec python3 "$srv" --cli "$cli" --home "$OSRC_HOME" "$@"
 }
 
 # cmd_inbox [--json] -> what needs you right now. Terminal jobs (permission-blocked, asked for input)
@@ -22224,7 +22238,8 @@ main() {
     gc)          cmd_gc "$@" ;;                            # remove old completed job dirs (gc --older-than DAYS)
     tab)         cmd_tab "$@" ;;
     outcomes)    cmd_outcomes "$@" ;;
-    inbox)       cmd_inbox "$@" ;;                         # what needs you right now: one row per session/job/decision, one action each                      # what delegated work achieved: verified rate, lane x model x task class                           # the Tab: ledger / savings summary
+    inbox)       cmd_inbox "$@" ;;
+    dash)        cmd_dash "$@" ;;                          # local dashboard on 127.0.0.1 (token-gated, read-only)                         # what needs you right now: one row per session/job/decision, one action each                      # what delegated work achieved: verified rate, lane x model x task class                           # the Tab: ledger / savings summary
     sanitize)    cmd_sanitize "$@" ;;                      # scrub fallback-trigger vocab from prose/state/commit files (--write applies)
     estimate)    cmd_estimate "$@" ;;                      # quote table across the chain + Opus
     suggest|deals) cmd_suggest "$@" ;;                     # live low-cash and plan-included models
