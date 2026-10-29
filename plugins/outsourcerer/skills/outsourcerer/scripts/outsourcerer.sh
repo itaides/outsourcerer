@@ -51,6 +51,8 @@
 #   explain <job-id>               Diagnose a job's terminal state: state + persisted reason +
 #                                  last OSRC:: marker + the _classify_job routing verdict. Degrades
 #                                  gracefully (missing jq/meta/reason -> "(not recorded)").
+#   inbox [--json]                 What needs you now: blocked/waiting sessions and jobs, held decisions,
+#                                  model drift, undelivered messages. One row each, one action each.
 #   outcomes [--days N] [--json]   What delegated work achieved (default 90 days): verified rate
 #                                  (passed = a check graded it), the breakdown, per lane x model x class.
 #   wait <job-id> [--for N]        BLOCK until a job is terminal; exit 0 done|done?, 3 blocked|permission-blocked, 1 other failure (failed|wedged|timeout|interrupted|canceled), 124 --for N elapsed while still live. Unlike watch (a bounded ~15s status poll), wait blocks to terminal by default.
@@ -9290,6 +9292,148 @@ cmd_outcomes() {
     "  passed \(.totals.passed) · done (unverified) \(.totals.completed_unverified) · failed \(.totals.failed) · reverted \(.totals.reverted) · blocked \(.totals.blocked) · abandoned \(.totals.abandoned)",
     (if .totals.n > 0 and .checked_runs == 0 then "  No run had a check, so nothing is verified. Add one: loop verify --check, crew --check, or land." else empty end),
     (.matrix | sort_by(-.n) | .[] | "  \(.lane // "?") \(.model // "?") [\(.task_class // "?")]  n=\(.n)  done \(.done_pct | p)  verified \(.verified_pct | p)  blocked \(.blocked_pct | p)")'
+}
+
+# ---- inbox: the "Needs you" triage ------------------------------------------------------------------
+# One list of what is blocked on the human, built from four sources: sessions (the fleet snapshot),
+# delegated jobs (status --json, which carries the observed model), held plan decisions, and messages
+# with no delivery receipt. One row per session / job / task (key s: / j: / t:), the most severe kind
+# wins. Every row has exactly one primary action: an argv of an EXISTING command, never a shell
+# string. An action whose argv holds "{answer}" sets input:"answer": the caller supplies that text.
+# Sessions whose state is unknown go to a separate `unknown` list; they are not alerts.
+# _INBOX_JQ is the triage itself, a pure function of {now, window_s, sessions, jobs, tasks, obligations}.
+_INBOX_JQ='
+  def nz: if . == null or . == "" then null else . end;
+  def act(l; a): {label:l, argv:a};
+  def repo(c): (c // "") | if . == "" then null else (split("/") | map(select(. != "")) | last) end;
+  def low: ascii_downcase;
+  def drifted(r; o): ((r // "") != "") and ((o // "") != "") and (o != "unknown")
+    and ((r | low) != (o | low)) and (((o | low) | contains(r | low)) | not) and (((r | low) | contains(o | low)) | not);
+  def sev: if .severity == "red" then 0 else 1 end;
+  def kind_rank: ["permission","blocked","model_drift","decision","waiting_on_you","not_delivered","maybe_stuck","unwatched"] as $o
+    | (.kind as $k | $o | index($k)) // 99;
+  .now as $now | .window_s as $win |
+  ( [ .jobs[] | . as $j | ($j.status_age // 0) as $age
+      | ( if $j.status == "permission-blocked" and $age <= $win then
+            {kind:"permission", severity:"red",
+             reason:("The lane refused an action it needed" + (if $j.progress.line then ". Last: " + $j.progress.line else "" end)),
+             primary_action:act("Explain"; ["outsourcerer","explain",$j.job_id])}
+          elif ($j.status == "blocked" or $j.progress.last_marker == "OSRC::NEED_INPUT") and $age <= $win then
+            {kind:"waiting_on_you", severity:"amber",
+             reason:($j.progress.line // "The delegate stopped and asked for input"),
+             primary_action:act("Read result"; ["outsourcerer","result",$j.job_id])}
+          elif ($j.status == "running" or $j.status == "launching") and drifted($j.model; $j.observed_model) then
+            {kind:"model_drift", severity:"red", reason:"Asked for \($j.model), the lane reported \($j.observed_model)",
+             primary_action:act("Watch"; ["outsourcerer","watch",$j.job_id]),
+             secondary_action:act("Cancel"; ["outsourcerer","cancel",$j.job_id])}
+          elif $j.status == "no-progress-writes" then
+            {kind:"maybe_stuck", severity:"amber",
+             reason:("Alive, but no file writes" + (if $j.progress.line then ". Last: " + $j.progress.line else "" end)),
+             primary_action:act("Watch"; ["outsourcerer","watch",$j.job_id]),
+             secondary_action:act("Cancel"; ["outsourcerer","cancel",$j.job_id])}
+          elif $j.status == "running" and $j.supervision == "not-armed" then
+            {kind:"unwatched", severity:"amber", reason:"Running with no supervisor armed, so nothing will notice if it wedges",
+             primary_action:act("Arm supervisor"; ["outsourcerer","heartbeat","start"]),
+             secondary_action:act("Cancel"; ["outsourcerer","cancel",$j.job_id])}
+          else empty end )
+      | . + {key:("j:" + $j.job_id), title:(($j.label // $j.verb // $j.job_id) | tostring), repo:repo($j.cwd),
+             lane:($j.provider // null), waiting_s:$age, refs:{job_id:$j.job_id}} ]
+  + [ .sessions[] | select((.self // 0) == 0 and .owner != "managed") | . as $s
+      | ( if $s.state == "blocked?" then
+            {kind:"waiting_on_you", severity:"amber", reason:($s.state_evidence // "The session is waiting for you"),
+             primary_action:act("Open"; ["outsourcerer","fleet","show",$s.session_id])}
+          elif $s.state == "blocked" then
+            {kind:"blocked", severity:"red", reason:($s.state_evidence // "The session is blocked"),
+             primary_action:act("Open"; ["outsourcerer","fleet","show",$s.session_id])}
+          elif $s.state == "unresponsive?" then
+            {kind:"maybe_stuck", severity:"amber", reason:($s.state_evidence // "Alive, but no progress"),
+             primary_action:act("Open"; ["outsourcerer","fleet","show",$s.session_id])}
+          elif drifted($s.requested_model; $s.observed_model) and ($s.state == "working" or $s.state == "idle") then
+            {kind:"model_drift", severity:"red", reason:"Asked for \($s.requested_model), the session runs \($s.observed_model)",
+             primary_action:act("Open"; ["outsourcerer","fleet","show",$s.session_id])}
+          else empty end )
+      | . + {key:("s:" + ($s.session_id // "")), title:(($s.display_name // $s.task_summary // $s.session_id) | tostring),
+             repo:repo($s.cwd), lane:($s.lane // $s.harness // null), waiting_s:($s.status_age // 0),
+             refs:{session_id:$s.session_id, job_id:($s.job_id // null)}} ]
+  + [ .tasks[] | . as $t | ($t.hold // {}) as $h
+      | {kind:"decision", severity:"amber", key:("t:" + $t.plan + "/" + $t.id),
+         title:(($h.reason // $t.title // $t.id) | tostring),
+         reason:("Plan \($t.plan) · \($t.title // $t.id)" + (if ($h.default // "") != "" then ". Default: \($h.default)" else "" end)),
+         repo:repo($t.repo), lane:null,
+         waiting_s:((try ($t.updated | fromdateiso8601) catch null) as $u | if $u == null then 0 else ($now - $u) end),
+         deadline_s:(if (($h.until_epoch // 0) | tonumber? // 0) > 0 then (($h.until_epoch | tonumber) - $now) else null end),
+         default:($h.default | nz), options:($h.options // null),
+         primary_action:{label:"Answer", argv:["outsourcerer","task","release",$t.id,"--plan",$t.plan,"--answer","{answer}"], input:"answer"},
+         refs:{plan:$t.plan, task:$t.id}}
+      | if .default then . + {secondary_action:act("Use default (\(.default))"; ["outsourcerer","task","release",$t.id,"--plan",$t.plan,"--answer",.default])} else . end ]
+  + ([ .sessions[] | select(.state != "ended" and .state != "dead") | .session_id ]) as $live
+  | . as $root
+  | [ $root.obligations[] | select(.state == "delivery_unknown")
+      | ((try (.ts | fromdateiso8601) catch null) as $u | if $u == null then null else ($now - $u) end) as $oage
+      | select(($oage != null and $oage <= $win) or (.session_id as $sid | $live | index($sid) != null))
+      | {kind:"not_delivered", severity:"amber", key:("s:" + .session_id), title:"A message was not confirmed delivered",
+         reason:"No delivery receipt for message \(.obligation_id), so the session may never have seen it",
+         repo:null, lane:null, waiting_s:($oage // 0),
+         primary_action:act("Open"; ["outsourcerer","fleet","show",.session_id]),
+         refs:{session_id:.session_id, obligation_id:.obligation_id}} ]
+  ) as $all
+  | ($all | group_by(.key) | map(sort_by([sev, kind_rank]) | first) | sort_by([sev, -(.waiting_s)])) as $items
+  | ([ .sessions[] | select((.self // 0) == 0 and .owner != "managed" and .state == "unknown")
+       | {session_id, title:((.display_name // .task_summary // .session_id) | tostring), repo:repo(.cwd),
+          lane:(.lane // .harness // null), last_seen_s:(.status_age // null)} ]) as $unknown
+  | {schema_version:"1", items:$items, unknown:$unknown,
+     counts:{items:($items | length), red:($items | map(select(.severity == "red")) | length),
+             amber:($items | map(select(.severity == "amber")) | length), unknown:($unknown | length)}}'
+
+# _inbox_inputs -> the JSON object _INBOX_JQ reads. Jobs get status_age (seconds since the status file
+# last changed) and their supervision flag; held tasks carry their plan and its repo.
+_inbox_inputs() {
+  local now d id jobs="[]" j sa sup tasks="[]" pd f sessions obl="[]" snap
+  now="$(date +%s)"
+  for d in "$OSRC_JOBS"/*/; do
+    [ -d "$d" ] || continue
+    id="$(basename "$d")"
+    j="$(OSRC_RECONCILE_READ_ONLY=1 _job_json "$id" 2>/dev/null | jq -c . 2>/dev/null)" || continue
+    [ -n "$j" ] || continue
+    sa="$(_mtime "$d/status")"; case "$sa" in ''|*[!0-9]*) sa="$now" ;; esac
+    sup="$(head -1 "$d/supervision" 2>/dev/null)"
+    jobs="$(jq -c --argjson j "$j" --argjson age "$(( now - sa ))" --arg sup "$sup" \
+      '. + [$j + {status_age:$age, supervision:(if $sup == "" then null else $sup end)}]' <<<"$jobs")" || return 1
+  done
+  for pd in "$OSRC_HOME"/plans/*/; do
+    [ -f "$pd/plan.json" ] || continue
+    for f in "$pd"tasks/t*.json; do
+      [ -f "$f" ] || continue
+      tasks="$(jq -c --slurpfile t "$f" --slurpfile p "$pd/plan.json" --arg plan "$(basename "$pd")" \
+        'if ($t[0].state // "") == "held" then . + [$t[0] + {plan:$plan, repo:($p[0].repo // null)}] else . end' <<<"$tasks" 2>/dev/null)" || return 1
+    done
+  done
+  if [ -s "$OSRC_OBLIGATIONS" ] && [ ! -L "$OSRC_OBLIGATIONS" ]; then
+    obl="$(jq -sRc '[split("\n")[] | fromjson? // empty | select(type == "object" and .obligation_id)]
+                    | group_by(.obligation_id) | map(last)' < "$OSRC_OBLIGATIONS" 2>/dev/null)" || obl="[]"
+  fi
+  snap="$(OSRC_FLEET_CLI_RECONCILE=1 _fleet_snapshot_refresh 2>/dev/null)" || snap=""
+  sessions="$(printf '%s' "$snap" | jq -c '.items // []' 2>/dev/null)"; [ -n "$sessions" ] || sessions="[]"
+  jq -cn --argjson now "$now" --argjson win "${OSRC_INBOX_WINDOW_S:-86400}" --argjson s "$sessions" \
+    --argjson j "$jobs" --argjson t "$tasks" --argjson o "$obl" \
+    '{now:$now, window_s:$win, sessions:$s, jobs:$j, tasks:$t, obligations:$o}'
+}
+
+# cmd_inbox [--json] -> what needs you right now. Terminal jobs (permission-blocked, asked for input)
+# stay listed for OSRC_INBOX_WINDOW_S (default 24h) after they stopped; live problems stay while live.
+cmd_inbox() {
+  local json=0
+  case "${1:-}" in --json) json=1 ;; "") ;; *) die "inbox: unknown argument '$1' (use --json)" ;; esac
+  have jq || die "inbox needs jq"
+  case "${OSRC_INBOX_WINDOW_S:-86400}" in *[!0-9]*|'') die "inbox: OSRC_INBOX_WINDOW_S must be a number of seconds" ;; esac
+  local in out; in="$(_inbox_inputs)" || die "inbox: could not collect its sources"
+  out="$(printf '%s' "$in" | jq -c "$_INBOX_JQ")" || die "inbox: could not build the list"
+  if [ "$json" = 1 ]; then printf '%s\n' "$out"; return 0; fi
+  printf '%s' "$out" | jq -r '
+    def ago: if . < 60 then "\(.)s" elif . < 3600 then "\(. / 60 | floor)m" else "\(. / 3600 | floor)h" end;
+    if .counts.items == 0 then "Nothing needs you." else "\(.counts.items) need you (\(.counts.red) blocking):" end,
+    (.items[] | "  [\(.severity)] \(.kind)  \(.title)\(if .repo then "  (" + .repo + ")" else "" end)  waiting \(.waiting_s | ago)\n      \(.reason)\n      -> \(.primary_action.label): \(.primary_action.argv | join(" "))"),
+    (if .counts.unknown > 0 then "Cannot tell (\(.counts.unknown)): sessions whose state is unknown, not alerts." else empty end)'
 }
 
 # _history_mult <lane> <model> <category> -> "mult|n_eff|passed_eff|scope"
@@ -22091,7 +22235,8 @@ main() {
     cleanup)     cmd_cleanup "$@" ;;                       # remove a job/fanout git worktree (conservative)
     gc)          cmd_gc "$@" ;;                            # remove old completed job dirs (gc --older-than DAYS)
     tab)         cmd_tab "$@" ;;
-    outcomes)    cmd_outcomes "$@" ;;                      # what delegated work achieved: verified rate, lane x model x task class                           # the Tab: ledger / savings summary
+    outcomes)    cmd_outcomes "$@" ;;
+    inbox)       cmd_inbox "$@" ;;                         # what needs you right now: one row per session/job/decision, one action each                      # what delegated work achieved: verified rate, lane x model x task class                           # the Tab: ledger / savings summary
     sanitize)    cmd_sanitize "$@" ;;                      # scrub fallback-trigger vocab from prose/state/commit files (--write applies)
     estimate)    cmd_estimate "$@" ;;                      # quote table across the chain + Opus
     suggest|deals) cmd_suggest "$@" ;;                     # live low-cash and plan-included models

@@ -330,6 +330,7 @@ The plain-text output of every command is unchanged.
 | `exclude ls --json` | `entries[]` (`entry`, `source`: `saved` or `env`), `invalid[]` |
 | `limits status --json` | `caps[]` (`key`, `lane`, `model`, `per_day`, `reset`, `used_today`) |
 | `heartbeat status --json` | `armed`, `pid` (exit code is still 1 when nothing is armed) |
+| `inbox --json` | `items[]` (`kind`, `severity` red or amber, `key`, `title`, `reason`, `repo`, `lane`, `waiting_s`, for decisions also `deadline_s`, `default`, `options`; `primary_action` and optional `secondary_action`, each `{label, argv}`, plus `input:"answer"` when the argv holds `{answer}`; `refs` with `job_id` / `session_id` / `plan` + `task` / `obligation_id`), `unknown[]` (`session_id`, `title`, `repo`, `lane`, `last_seen_s`), `counts` (`items`, `red`, `amber`, `unknown`) |
 | `doctor --json` | `version`, `platform`, `state_home` (`path`, `writable`), `lanes[]` (`lane`, `cli[]`, `installed` (null when the lane has no CLI of its own), `ready`, `detail`, `down`, `down_reason`, `postures[]`, `cost_class`, `cost_disclosure`, `is_cloud`, `plan_limited`, `compare_class`), `summary` (`lanes`, `ready`, `down`). Runs the same cheap probes as `brief`; no paid pings. |
 | `posture status --json` | `postures[]` (`lane`, `key`, `value`) |
 | `tap status --json` | `installed`, `capturing`, `reading_age_s`, `five_hour`, `seven_day` |
