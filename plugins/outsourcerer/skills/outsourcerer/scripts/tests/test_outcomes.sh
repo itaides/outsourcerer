@@ -52,7 +52,7 @@ f="$OSRC_HOME/outcomes-202610.jsonl"
   row 5  dv swe-2-high code abandoned timeout
   row 6  cx gpt-5.6-sol code passed
   row 6  cx gpt-5.6-sol code failed test_failure
-  row 7  cx gpt-5.6-sol reasoning completed_unverified
+  row 6  cx gpt-5.6-sol reasoning completed_unverified   # not 7: a row exactly on the window edge flips with the clock
   row 40 gm gemini-3.1-pro agentic blocked lane_down
   row 200 cx gpt-5.6-sol code passed
   echo 'not json at all'
