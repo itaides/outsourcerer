@@ -77,6 +77,7 @@ out="$(triage "$in")"
 check "sessions: each problem becomes its kind" "$out" '([.items[] | {(.refs.session_id): .kind}] | add) == {"s-wait":"waiting_on_you","s-blk":"blocked","s-slow":"maybe_stuck","s-drift":"model_drift"}'
 check "sessions: this session and managed jobs are skipped" "$out" 'all(.items[]; .refs.session_id != "s-self" and .refs.session_id != "s-mgd")'
 check "sessions: unknown state goes to the unknown list, not items" "$out" '.unknown == [{session_id:"s-unk", title:"session s-unk", repo:"ora", lane:"cc", last_seen_s:9000}] and .counts.unknown == 1'
+check "sessions: a waiting session can be replied to (your text)" "$out" '(.items[] | select(.refs.session_id=="s-wait") | .secondary_action) == {label:"Reply", argv:["outsourcerer","session","reply","s-wait","{answer}"], input:"answer"}'
 check "sessions: action opens the session" "$out" '(.items[] | select(.refs.session_id=="s-wait") | .primary_action.argv) == ["outsourcerer","fleet","show","s-wait"]'
 
 task='{"id":"t4","plan":"rate-limit","repo":"/r/ora","title":"counter store","state":"held","updated":"'"$(iso $((NOW-1560)))"'","hold":{"reason":"Postgres or SQLite?","until":"x","until_epoch":'"$((NOW+6120))"',"default":"SQLite","answer":""}}'

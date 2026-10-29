@@ -371,11 +371,16 @@ its sign-in URL; `--print-url` prints the URL and exits. It needs `python3` (sta
 - **Actions behind one door.** `POST /api/run` with `{"argv": [...]}` runs one action, only when the argv
   matches a fixed shape: `task release <tN> --plan <p> --answer <text>`, `cancel|watch|explain|result
   <job>`, `fleet show <session>`, `heartbeat start`, `mode auto|hybrid|manual`, `exclude add|rm <model>`,
-  `consent grant|revoke`, `tap install`, `posture reset`. Values are validated (ids, model names that cannot start with
+  `consent grant|revoke`, `tap install`, `posture reset`, `session reply <session> <text>`, and launches:
+  `bg [--worktree] <run|research|edit|yolo> [-m <model>] <task>` and `loop verify [-m <model>] --check
+  <cmd> --verb edit|yolo --max N --max-minutes N [--worktree] -- <task>` (a task cannot start with `-`; a
+  check is one line of at most 500 characters; `--cloud-ack` is never allowed, so cloud lanes need the
+  remembered consent from Settings). A loop is started detached with its output in
+  `<state home>/dash/launches/` (0600), and an immediate refusal is reported. Values are validated (ids, model names that cannot start with
   `-`, answers up to 2000 characters) and passed as argv elements, never through a shell. The request
   also needs the `X-Osrc-Dash: 1` header and a JSON content type, which a cross-site form cannot send.
   The output is redacted with the same patterns as `explain`, and the read cache is cleared. The page
-  asks for a second click before cancel, consent revoke and posture reset. Anything else is a 403.
+  asks for a second click before cancel, consent revoke, posture reset and any yolo launch. Anything else is a 403.
 - **Command palette.** ⌘K (Ctrl+K) opens a search over every screen, recent run, live session, inbox
   action and settings action. It runs nothing the buttons could not: actions use the same allow-list,
   and destructive ones need a second Enter.

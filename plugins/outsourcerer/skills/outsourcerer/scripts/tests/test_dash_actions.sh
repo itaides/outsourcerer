@@ -55,7 +55,7 @@ c="$(post "{\"argv\":[\"task\",\"release\",\"t1\",\"--plan\",\"p\",\"--answer\",
 [ "$c" = 400 ] && ok "oversized body -> 400" || bad "oversized body: $c"
 
 # --- the allow-list ----------------------------------------------------------------------------------------
-for argv in '["mode","yolo"]' '["mode","hybrid","x"]' '["yolo","rm -rf /"]' '["bg","edit","do it"]' '["cancel","--all"]' \
+for argv in '["mode","yolo"]' '["mode","hybrid","x"]' '["yolo","rm -rf /"]' '["cancel","--all"]' \
             '["cancel","../x"]' '["exclude","add","-m"]' '["task","release","t1","--plan","p"]' '["task","release","x1","--plan","p","--answer","a"]' \
             '["gc","--older-than","0"]' '["mode",1]' '"mode hybrid"' '[]'; do
   [ "$(post "{\"argv\":$argv}")" = 403 ] && ok "refused: $argv" || bad "allowed: $argv -> $(cat "$TMP/body")"
@@ -83,6 +83,51 @@ printf '{"id":"t1","title":"pick a store","state":"held","shape":"scout","deps":
   && ok "task release runs with free-text answer" || bad "task release: $(cat "$TMP/body")"
 jq -e '.hold.answer == "SQLite; drop table x" and .state != "held"' "$OSRC_HOME/plans/rl/tasks/t1.json" >/dev/null \
   && ok "the answer is stored verbatim (an argv element, never shell)" || bad "answer: $(cat "$OSRC_HOME/plans/rl/tasks/t1.json")"
+
+# --- launching work and replying: the allow-list (checked in-process; no real lane is ever started here) ---
+allow() { python3 - "$SRV" "$1" <<'PY'
+import importlib.util, json, sys
+sp = importlib.util.spec_from_file_location("srv", sys.argv[1]); m = importlib.util.module_from_spec(sp); sp.loader.exec_module(m)
+print("yes" if m.action_allowed(json.loads(sys.argv[2])) else "no")
+PY
+}
+# a duplicate key in the VALIDATORS literal silently replaces the first validator (it once let any
+# string through as a plan task id), so the keys must be unique
+python3 - "$SRV" <<'PY' && ok "VALIDATORS has no duplicate keys" || bad "VALIDATORS has a duplicate key"
+import ast, sys
+tree = ast.parse(open(sys.argv[1]).read())
+for node in ast.walk(tree):
+    if isinstance(node, ast.Assign) and any(getattr(t, "id", "") == "VALIDATORS" for t in node.targets):
+        keys = [k.value for k in node.value.keys]
+        sys.exit(0 if len(keys) == len(set(keys)) else 1)
+sys.exit(1)
+PY
+[ "$(allow '["task","release","x1","--plan","p","--answer","a"]')" = no ] && ok "plan task ids still have to look like tN" || bad "task id validator was replaced"
+for argv in '["bg","edit","fix the flaky tests"]' '["bg","run","-m","gpt-5.6-sol","map the auth module"]' '["bg","--worktree","yolo","-m","z-ai/glm-5.2","refactor x"]' \
+            '["loop","verify","--check","npm test","--verb","edit","--max","4","--max-minutes","20","--worktree","--","make it pass"]' \
+            '["loop","verify","-m","sol","--check","npx playwright test --retries=0","--verb","yolo","--max","3","--max-minutes","15","--","x"]' \
+            '["session","reply","dec1a421-5e50-4c02-a675-595da44f531c","go on"]'; do
+  [ "$(allow "$argv")" = yes ] && ok "allowed: $argv" || bad "refused: $argv"
+done
+for argv in '["bg","--cloud-ack","edit","x"]' '["bg","edit","--yolo"]' '["bg","edit","-rf x"]' '["bg","sudo","x"]' '["bg","edit","-m","-x","t"]' '["bg","edit","t","extra"]' \
+            '["loop","verify","--check","npm test\nrm -rf /","--verb","edit","--max","4","--max-minutes","20","--","x"]' \
+            '["loop","verify","--check","npm test","--verb","run","--max","4","--max-minutes","20","--","x"]' \
+            '["loop","verify","--check","npm test","--verb","edit","--max","0","--max-minutes","20","--","x"]' \
+            '["loop","verify","--check","npm test","--verb","edit","--max","4","--max-minutes","20","x"]' \
+            '["session","reply","../x","hi"]' '["session","send","s1","hi"]'; do
+  [ "$(allow "$argv")" = no ] && ok "refused: $argv" || bad "allowed: $argv"
+done
+# a loop starts detached; an immediate refusal (here: an excluded model) is reported, not hidden
+OSRC_HOME="$OSRC_HOME" bash "$SRC" exclude add fable >/dev/null 2>&1
+[ "$(post '{"argv":["loop","verify","-m","fable","--check","true","--verb","edit","--max","1","--max-minutes","1","--","x"]}')" = 200 ] \
+  && jq -e '(.ok | not) and .exit != 0 and (.log | test("/dash/launches/loop-"))' "$TMP/body" >/dev/null \
+  && ok "a refused loop launch reports its exit and log" || bad "loop launch: $(cat "$TMP/body")"
+lf="$(jq -r .log "$TMP/body")"; m="$(stat -c %a "$lf" 2>/dev/null || stat -f %Lp "$lf")"
+[ "$m" = 600 ] && ok "the launch log is private (0600)" || bad "launch log mode $m"
+OSRC_HOME="$OSRC_HOME" bash "$SRC" exclude rm fable >/dev/null 2>&1
+# replying to a session that does not exist fails visibly
+[ "$(post '{"argv":["session","reply","no-such-session","hello"]}')" = 200 ] && jq -e '(.ok | not) and .exit != 0' "$TMP/body" >/dev/null \
+  && ok "a reply to an unknown session reports its failure" || bad "reply: $(cat "$TMP/body")"
 
 # posture reset clears remembered postures
 mkdir -p "$OSRC_HOME/lane-posture"; printf 'refused\n' > "$OSRC_HOME/lane-posture/dv.yolo"

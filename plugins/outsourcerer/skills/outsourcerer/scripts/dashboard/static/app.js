@@ -46,9 +46,10 @@ async function copy(text) {
 
 // Run one allow-listed action through the server (POST /api/run). Destructive ones ask for a second
 // click on the same button instead of a browser dialog.
-const DESTRUCTIVE = (argv) => argv[1] === "cancel" || (argv[1] === "consent" && argv[2] === "revoke") || (argv[1] === "posture" && argv[2] === "reset");
+const DESTRUCTIVE = (argv) => argv[1] === "cancel" || (argv[1] === "consent" && argv[2] === "revoke") || (argv[1] === "posture" && argv[2] === "reset")
+  || ((argv[1] === "bg" || argv[1] === "loop") && argv.includes("yolo"));   // yolo = all tools, no sandbox
 // Actions that only read: their output is the point, so it opens in the drawer instead of a toast.
-const READS = (argv) => ["explain", "result", "watch"].includes(argv[1]) || (argv[1] === "fleet" && argv[2] === "show");
+const READS = (argv) => ["explain", "result", "watch", "bg", "loop"].includes(argv[1]) || (argv[1] === "fleet" && argv[2] === "show");
 async function runAction(argv, btn) {
   if (btn && DESTRUCTIVE(argv) && btn.dataset.armed !== "1") {
     btn.dataset.armed = "1"; btn.dataset.label = btn.textContent; btn.textContent = "Click again to confirm";
@@ -550,31 +551,50 @@ function dag(ps) {
 }
 
 // ---- 6 · New delegation --------------------------------------------------------------------------------------------
-let delTask = "", delShape = "bg", delVerb = "edit", delOut = null;
+// One-shot and Loop launch from here (allow-listed `bg` / `loop verify` shapes); fanout, crew and second opinion stay
+// copy-a-command for now. advise + estimate recommend a lane before you launch.
+let delTask = "", delShape = "bg", delVerb = "edit", delModel = "", delWt = true, delCheck = "", delMax = "4", delMin = "20", delOut = null;
+function delArgv() {
+  const t = delTask.trim(), m = delModel.trim();
+  if (delShape === "loop") {
+    const v = delVerb === "yolo" ? "yolo" : "edit";
+    return ["outsourcerer", "loop", "verify", ...(m ? ["-m", m] : []), "--check", delCheck.trim() || "<check command>", "--verb", v,
+      "--max", delMax || "4", "--max-minutes", delMin || "20", ...(delWt ? ["--worktree"] : []), "--", t || "<task>"];
+  }
+  if (delShape === "fanout") return ["outsourcerer", "fanout", "--verb", delVerb, "--", t || "<task>"];
+  if (delShape === "crew") return ["outsourcerer", "crew", "--check", delCheck.trim() || "<check command>", "--", t || "<task>", t || "<task>", t || "<task>"];
+  if (delShape === "second") return ["outsourcerer", "second-opinion", t || "<task>"];
+  return ["outsourcerer", "bg", ...(delWt ? ["--worktree"] : []), delVerb, ...(m ? ["-m", m] : []), t || "<task>"];
+}
 SCREENS.delegate = { every: 3600, async render(v) {
   const shapes = { bg: "One-shot", loop: "Loop (until a check passes)", fanout: "Fanout", crew: "Crew (N writers, keep best)", second: "Second opinion" };
   const verbs = { run: "Read-only", research: "Sandboxed", edit: "Edits", yolo: "Yolo" };
-  const ta = h("textarea", { "aria-label": "Task", placeholder: "Describe the task…", oninput: (e) => { delTask = e.target.value; preview(); } });
-  ta.value = delTask;
+  const launchable = delShape === "bg" || delShape === "loop";
   const pre = h("div", { class: "log" });
-  function preview() {
-    const t = delTask.trim() || "<task>";
-    const argv = delShape === "loop" ? ["outsourcerer", "loop", "verify", "--check", "<check command>", "--verb", delVerb === "run" || delVerb === "research" ? "edit" : delVerb, "--worktree", t]
-      : delShape === "fanout" ? ["outsourcerer", "fanout", "--verb", delVerb, "--", t]
-      : delShape === "crew" ? ["outsourcerer", "crew", "--check", "<check command>", "--", t, t, t]
-      : delShape === "second" ? ["outsourcerer", "second-opinion", t]
-      : ["outsourcerer", "bg", delVerb, t];
-    pre.textContent = cmdline(argv); pre.dataset.cmd = cmdline(argv);
+  const goBtn = h("button", { class: "pbtn", type: "button" }, delVerb === "yolo" ? "Launch (yolo: all tools, no sandbox)" : "Launch");
+  function sync() {
+    const argv = delArgv(); pre.textContent = cmdline(argv); pre.dataset.cmd = cmdline(argv);
+    const missing = !delTask.trim() ? "Describe the task first" : delTask.trim().startsWith("-") ? "The task cannot start with -"
+      : (delShape === "loop" && !delCheck.trim()) ? "A loop needs a check command" : "";
+    goBtn.disabled = !launchable || !!missing; goBtn.title = !launchable ? "This shape is copy-only for now" : missing || "Runs: " + cmdline(argv);
   }
-  preview();
+  const field = (label, el) => h("label", { class: "stack", style: "gap:4px" }, h("span", { class: "muted small" }, label), el);
+  const ta = h("textarea", { "aria-label": "Task", placeholder: "Describe the task…", oninput: (e) => { delTask = e.target.value; sync(); } }); ta.value = delTask;
+  const model = h("input", { type: "text", placeholder: "default (let routing pick)", "aria-label": "Model", oninput: (e) => { delModel = e.target.value; sync(); } }); model.value = delModel;
+  const wt = h("input", { type: "checkbox", "aria-label": "Run in its own git worktree", onchange: (e) => { delWt = e.target.checked; sync(); } }); wt.checked = delWt;
+  const check = h("input", { type: "text", placeholder: "e.g. npm test", "aria-label": "Check command", style: "width:100%", oninput: (e) => { delCheck = e.target.value; sync(); } }); check.value = delCheck;
+  const mx = h("input", { type: "text", size: 3, "aria-label": "Max attempts", oninput: (e) => { delMax = e.target.value.replace(/\D/g, ""); sync(); } }); mx.value = delMax;
+  const mm = h("input", { type: "text", size: 3, "aria-label": "Max minutes", oninput: (e) => { delMin = e.target.value.replace(/\D/g, ""); sync(); } }); mm.value = delMin;
+  const rerender = () => SCREENS.delegate.render($("view"));
   const seg = (obj, cur, set) => h("div", { class: "tabs" }, Object.entries(obj).map(([k, l]) => h("button", { class: "tab", type: "button", "aria-selected": String(k === cur),
-    onclick: () => { set(k); SCREENS.delegate.render($("view")); } }, l)));
-  const go = h("button", { class: "pbtn", type: "button", onclick: async () => {
+    onclick: () => { set(k); rerender(); } }, l)));
+  goBtn.addEventListener("click", () => { const argv = delArgv(); runAction(argv, goBtn); });
+  const ask = h("button", { class: "btn", type: "button", onclick: async () => {
     if (!delTask.trim()) return toast("Describe the task first");
-    go.disabled = true; go.textContent = "Asking advise and estimate…";
+    ask.disabled = true; ask.textContent = "Asking advise and estimate…";
     const q = encodeURIComponent(delTask.trim());
     delOut = await many([`advise?task=${q}`, `estimate?task=${q}`]); delOut.q = q;
-    go.disabled = false; if (current === "delegate") SCREENS.delegate.render($("view"));
+    ask.disabled = false; if (current === "delegate") rerender();
   } }, "Recommend a lane");
   let res = null;
   if (delOut) {
@@ -583,18 +603,32 @@ SCREENS.delegate = { every: 3600, async render(v) {
       failed(a) ? errBox("advise", a) : h("section", { class: "card pad stack", style: "gap:6px" }, h("h2", {}, "Recommendation"),
         h("p", {}, h("span", { class: "mono" }, `${nz(a.recommendation.lane)} · ${nz(a.recommendation.model)}`), h("span", { class: "muted" }, `  ${a.category} · ${a.difficulty} · effort ${a.effort}`)),
         h("p", { class: "muted small" }, nz(a.recommendation.reason, "")), a.conservation ? h("p", { class: "amber small" }, a.conservation) : null,
-        h("div", { class: "tbl" }, h("table", { style: "min-width:0" }, h("thead", {}, h("tr", {}, ["Lane", "Model", "Score", "Meets bar"].map((c) => h("th", {}, c)))),
-          h("tbody", {}, (a.shortlist || []).slice(0, 8).map((s) => h("tr", {}, h("td", {}, s.lane), h("td", { class: "mono" }, s.model), h("td", { class: "mono" }, nz(s.score)), h("td", {}, s.meets ? "yes" : "no"))))))),
+        a.recommendation.model ? h("button", { class: "btn small", type: "button", onclick: () => { delModel = a.recommendation.model; rerender(); } }, `Use ${a.recommendation.model}`) : null,
+        h("div", { class: "tbl" }, h("table", { style: "min-width:0" }, h("thead", {}, h("tr", {}, ["Lane", "Model", "Score", "Meets bar", ""].map((c) => h("th", {}, c)))),
+          h("tbody", {}, (a.shortlist || []).slice(0, 8).map((s) => h("tr", {}, h("td", {}, s.lane), h("td", { class: "mono" }, s.model), h("td", { class: "mono" }, nz(s.score)), h("td", {}, s.meets ? "yes" : "no"),
+            h("td", {}, h("button", { class: "ghost small", type: "button", onclick: () => { delModel = s.model; rerender(); } }, "Use")))))))),
       failed(e) ? errBox("estimate", e) : h("section", { class: "card pad stack", style: "gap:6px" }, h("h2", {}, "Cost"),
         h("p", { class: "muted" }, `${e.prompt_tokens} prompt tokens · opus would cost ≈ $${Number(e.counterfactual_opus_usd).toFixed(2)}`),
         (e.plan_lanes || []).map((p) => h("div", { class: "small" }, h("span", { class: "mono" }, p.lane), `  ${p.label}: ${p.cost}`)),
         (e.cash_chain || []).map((c) => h("div", { class: "small" }, h("span", { class: "mono" }, c.model), `  ≈ $${c.usd === null ? "?" : c.usd.toFixed(3)} cash`))));
   }
-  put(v, h("div", { class: "head" }, h("div", {}, h("h1", {}, "New delegation"), h("p", { class: "sub" }, "Get a recommendation and the exact command. Run it in your lead session."))),
-    h("div", { class: "cols" }, h("div", { class: "wide stack" }, ta, h("div", {}, h("div", { class: "muted small" }, "Shape"), seg(shapes, delShape, (k) => { delShape = k; })),
-      h("div", {}, h("div", { class: "muted small" }, "Access"), seg(verbs, delVerb, (k) => { delVerb = k; })),
-      h("div", { style: "display:flex;gap:8px" }, go, h("button", { class: "btn", type: "button", onclick: () => copy(pre.dataset.cmd) }, "Copy command")), pre),
-      h("div", { class: "side" }, res || h("p", { class: "muted" }, "The recommendation and cost show here."))));
+  put(v, h("div", { class: "head" }, h("div", {}, h("h1", {}, "New delegation"),
+      h("p", { class: "sub" }, "Describe the work, pick how it runs, and launch it. It shows up in Live."))),
+    h("div", { class: "cols" }, h("div", { class: "wide stack" }, ta,
+      field("Shape", seg(shapes, delShape, (k) => { delShape = k; })),
+      field("Access", seg(verbs, delVerb, (k) => { delVerb = k; })),
+      h("div", { style: "display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end" },
+        field("Model", model),
+        h("label", { style: "display:flex;gap:6px;align-items:center" }, wt, h("span", {}, "Own git worktree"))),
+      delShape === "loop" || delShape === "crew" ? field("Check (must pass for the work to count)", check) : null,
+      delShape === "loop" ? h("div", { style: "display:flex;gap:16px;flex-wrap:wrap" }, field("Max attempts", mx), field("Max minutes", mm)) : null,
+      delShape === "loop" && delVerb !== "edit" && delVerb !== "yolo" ? h("p", { class: "faint small" }, "A loop writes files, so it runs with Edits access.") : null,
+      h("div", { style: "display:flex;gap:8px;flex-wrap:wrap" }, goBtn, ask, h("button", { class: "btn", type: "button", onclick: () => copy(pre.dataset.cmd) }, "Copy command")),
+      !launchable ? h("p", { class: "faint small" }, "This shape is copy-only for now: run the command in your lead session.") : null,
+      h("p", { class: "faint small" }, "Cloud lanes need cloud consent (Settings). Yolo asks for a second click."),
+      pre),
+      h("div", { class: "side" }, res || h("p", { class: "muted" }, "Ask for a recommendation to see the best lane, its score and the cost."))));
+  sync();
 } };
 
 // ---- 7 · Lanes ------------------------------------------------------------------------------------------------------
@@ -679,7 +713,10 @@ function paletteCommands() {
     if (a && a.input !== "answer") cmds.push(act("Needs you", `${a.label}: ${it.title}`, a.argv, kindLabel(it.kind) + (it.repo ? " · " + it.repo : "")));
     else if (a) cmds.push({ group: "Needs you", title: `Answer: ${it.title}`, sub: "opens the row to type your answer", keys: "answer " + it.title,
       run: () => { location.hash = "needs"; } });
-    if (it.secondary_action) cmds.push(act("Needs you", `${it.secondary_action.label}: ${it.title}`, it.secondary_action.argv));
+    const sa = it.secondary_action;
+    if (sa && sa.input !== "answer") cmds.push(act("Needs you", `${sa.label}: ${it.title}`, sa.argv));
+    else if (sa) cmds.push({ group: "Needs you", title: `${sa.label}: ${it.title}`, sub: "opens the row to type it", keys: sa.label + " " + it.title,
+      run: () => { location.hash = "needs"; } });
   });
   const st = cache.status;
   if (st && st.jobs) st.jobs.slice(0, 25).forEach((j) => cmds.push({ group: "Runs", title: `${nz(j.label, j.verb)} · ${nz(j.provider)} ${nz(j.model, "")}`,

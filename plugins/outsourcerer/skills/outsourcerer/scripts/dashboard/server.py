@@ -109,6 +109,12 @@ VALIDATORS = {
     "{answer}": lambda v: 0 < len(v) <= 2000 and "\x00" not in v,
     "{model}":  lambda v: bool(MODEL_RE.match(v)),
     "{sel}":    lambda v: bool(ID_RE.match(v)) and ".." not in v,
+    # launching work: the task is free text but never an option; a check is one line, like a shell prompt
+    "{verb}":   lambda v: v in ("run", "research", "edit", "yolo"),
+    "{lverb}":  lambda v: v in ("edit", "yolo"),
+    "{num}":    lambda v: v.isdigit() and 1 <= int(v) <= 999,
+    "{text}":   lambda v: 0 < len(v.strip()) and len(v) <= 4000 and "\x00" not in v and not v.lstrip().startswith("-"),
+    "{check}":  lambda v: 0 < len(v.strip()) and len(v) <= 500 and "\x00" not in v and "\n" not in v,
 }
 ACTIONS = [
     ["task", "release", "{task}", "--plan", "{plan}", "--answer", "{answer}"],
@@ -123,6 +129,18 @@ ACTIONS = [
     ["consent", "grant"], ["consent", "revoke"],
     ["tap", "install"],
     ["posture", "reset"],
+    # reply to a session that is waiting on you
+    ["session", "reply", "{sel}", "{answer}"],
+    # launch: one-shot background job, or a loop that retries until the check passes. No --cloud-ack:
+    # without remembered cloud consent the launch stops and says so (grant it in Settings).
+    ["bg", "{verb}", "{text}"],
+    ["bg", "{verb}", "-m", "{model}", "{text}"],
+    ["bg", "--worktree", "{verb}", "{text}"],
+    ["bg", "--worktree", "{verb}", "-m", "{model}", "{text}"],
+    ["loop", "verify", "--check", "{check}", "--verb", "{lverb}", "--max", "{num}", "--max-minutes", "{num}", "--", "{text}"],
+    ["loop", "verify", "--check", "{check}", "--verb", "{lverb}", "--max", "{num}", "--max-minutes", "{num}", "--worktree", "--", "{text}"],
+    ["loop", "verify", "-m", "{model}", "--check", "{check}", "--verb", "{lverb}", "--max", "{num}", "--max-minutes", "{num}", "--", "{text}"],
+    ["loop", "verify", "-m", "{model}", "--check", "{check}", "--verb", "{lverb}", "--max", "{num}", "--max-minutes", "{num}", "--worktree", "--", "{text}"],
 ]
 ACTION_TIMEOUT = int(os.environ.get("OSRC_DASH_ACTION_TIMEOUT", "60"))
 
@@ -276,7 +294,38 @@ class Runner:
             return res
 
 
+def launch_detached(runner, argv):
+    """`loop verify` runs until the loop ends (often many minutes), longer than any request should wait.
+    Start it in its own session with output to a private log, and answer at once; it shows up in
+    `loop status` (Live -> Loops) within a moment."""
+    d = os.path.join(runner.home, "dash", "launches")
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    log = os.path.join(d, "loop-%d-%d.log" % (int(time.time()), os.getpid()))
+    env = dict(os.environ, OSRC_HOME=runner.home, OSRC_BLIND_TURN_GUARD="0", NO_COLOR="1")
+    fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        p = subprocess.Popen(["bash", runner.cli] + argv, stdin=subprocess.DEVNULL, stdout=fd, stderr=fd,
+                             env=env, start_new_session=True)
+    finally:
+        os.close(fd)
+    time.sleep(1.0)   # an immediate refusal (bad model, excluded, no consent) is worth reporting now
+    rc = p.poll()
+    try:
+        with open(log, "rb") as f:
+            head = redact(f.read().decode("utf-8", "replace"))[-4000:]
+    except OSError:
+        head = ""
+    runner.invalidate()
+    if rc is not None and rc != 0:
+        return {"command": ["outsourcerer"] + argv, "exit": rc, "ok": False, "stdout": "", "stderr": head, "log": log}
+    return {"command": ["outsourcerer"] + argv, "exit": 0 if rc is None else rc, "ok": True, "detached": rc is None, "pid": p.pid,
+            "stdout": (head + "\n" if head else "") + "Started in the background (pid %d). It shows up in Live, under Loops. Log: %s" % (p.pid, log),
+            "stderr": "", "log": log}
+
+
 def run_action(runner, argv):
+    if argv[:2] == ["loop", "verify"]:
+        return launch_detached(runner, argv)
     env = dict(os.environ, OSRC_HOME=runner.home, OSRC_BLIND_TURN_GUARD="0", NO_COLOR="1")
     try:
         p = subprocess.run(["bash", runner.cli] + argv, stdin=subprocess.DEVNULL, capture_output=True,

@@ -9368,13 +9368,15 @@ _INBOX_JQ='
   + [ .sessions[] | select((.self // 0) == 0 and .owner != "managed") | . as $s
       | ( if $s.state == "blocked?" then
             {kind:"waiting_on_you", severity:"amber", reason:($s.state_evidence // "The session is waiting for you"),
-             primary_action:act("Open"; ["outsourcerer","fleet","show",$s.session_id])}
+             primary_action:act("Open"; ["outsourcerer","fleet","show",$s.session_id]),
+             secondary_action:{label:"Reply", argv:["outsourcerer","session","reply",$s.session_id,"{answer}"], input:"answer"}}
           elif $s.state == "blocked" then
             {kind:"blocked", severity:"red", reason:($s.state_evidence // "The session is blocked"),
              primary_action:act("Open"; ["outsourcerer","fleet","show",$s.session_id])}
           elif $s.state == "unresponsive?" then
             {kind:"maybe_stuck", severity:"amber", reason:($s.state_evidence // "Alive, but no progress"),
-             primary_action:act("Open"; ["outsourcerer","fleet","show",$s.session_id])}
+             primary_action:act("Open"; ["outsourcerer","fleet","show",$s.session_id]),
+             secondary_action:{label:"Nudge", argv:["outsourcerer","session","reply",$s.session_id,"{answer}"], input:"answer"}}
           elif drifted($s.requested_model; $s.observed_model) and ($s.state == "working" or $s.state == "idle") then
             {kind:"model_drift", severity:"red", reason:"Asked for \($s.requested_model), the session runs \($s.observed_model)",
              primary_action:act("Open"; ["outsourcerer","fleet","show",$s.session_id])}
