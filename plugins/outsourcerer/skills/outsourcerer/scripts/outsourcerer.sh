@@ -2614,6 +2614,17 @@ _devin_with_prepare() {
   # Same set as the live holders: join without touching the home (it is already scoped to
   # exactly this set, and re-linking would briefly unlink a skill under a running delegate).
   _devin_skills_lock_acquire "$names"
+  # The exclusive holder scopes the shared home, writes the marker, links, and publishes. Do all of it
+  # under the lock's mutex as well: the marker is written BEFORE the links, so if a second dispatch ever
+  # got in between (CI showed "links=A+B, marker=B" twice on Linux), its scoping read a marker that did
+  # not yet list our links and the home ended with an extra skill no marker accounts for. Holding the
+  # mutex (milliseconds) makes that interleaving impossible whatever the lock does. A dispatch that dies
+  # in here leaves the mutex with its dead pid, which _devin_lock_debris reclaims.
+  local _mx=0
+  if [ "$_DEVIN_LOCK_SHARED" = "0" ] && [ -n "$_DEVIN_LOCK_DIR" ]; then
+    if _devin_lock_mutex_acquire "$_DEVIN_LOCK_DIR"; then _mx=1
+    else printf '>>> [with] the Devin grant mutex stayed busy for 10s; scoping the skills home without it.\n' >&2; fi
+  fi
   local marker="$dst/.outsourcerer-grants" prev
   if [ "$_DEVIN_LOCK_SHARED" = "0" ]; then
     # Marker safety: a PLANTED symlink at $marker would make the write below clobber a victim file
@@ -2652,7 +2663,7 @@ _devin_with_prepare() {
       printf '>>> [with] could not update the Devin grant marker %s; stale-grant cleanup may be skipped next dispatch.\n' "$marker" >&2
     fi
   fi
-  [ -n "$names" ] || { _devin_skills_lock_publish ""; return 0; }   # no skills granted: home scoped, empty marker published
+  [ -n "$names" ] || { _devin_skills_lock_publish ""; [ "$_mx" = 1 ] && _devin_lock_mutex_release "$_DEVIN_LOCK_DIR"; return 0; }   # no skills granted: home scoped, empty marker published
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     dir="$(_resolve_skill_dir "$name" 2>/dev/null)"
@@ -2671,6 +2682,7 @@ _devin_with_prepare() {
 $names
 _OSRC_DEVIN_NAMES
   _devin_skills_lock_publish "$names"
+  [ "$_mx" = 1 ] && _devin_lock_mutex_release "$_DEVIN_LOCK_DIR"
   [ -n "$ok" ] && DEVIN_WITH_PRE="You have been granted the following skill(s). Each was synced into your skills home with its FULL directory contents (SKILL.md plus references/, scripts/, assets/) just before this run:
 $(while IFS= read -r name; do [ -n "$name" ] && printf '  %s (%s)\n' "$name" "$dst/$name"; done <<_OSRC_DEVIN_OK
 $ok

@@ -108,26 +108,28 @@ fi
 # test-then-create claim wins exactly once every time. An assertion like that certifies the one
 # property it cannot observe. Pre-forking the racers and holding them on a shared start flag makes
 # them contend for real, and the control below is what proves the assertion has teeth.
-_race_round() {   # <claim-fn> <dir> -> prints the number of winners, or ERR if the barrier broke
+_race_round() {   # <claim-fn> <dir> -> "WINNERS ATTEMPTS", or ERR if the barrier broke
+  # Each racer records what it actually did: win, lose, or noflag (its barrier wait timed out, so it
+  # never tried). mkdir is atomic, so among racers that DID try exactly one can win; a round where some
+  # racer never tried (a starved CI runner, a failed fork) says nothing about the claim, and the caller
+  # re-runs it instead of counting it as a claim failure.
   local fn="$1" d="$2"
-  local won="$TMP/wins.$$.txt" flag="$TMP/go.$$"
-  # A missing/empty TMP lands won/flag at the filesystem root — report a broken barrier
+  local res="$TMP/race.$$.txt" flag="$TMP/go.$$"
+  # A missing/empty TMP lands res/flag at the filesystem root — report a broken barrier
   # rather than racing on stray files (or spinning forever where they cannot be created).
   [ -n "${TMP:-}" ] && [ -d "$TMP" ] || { printf 'ERR'; return; }
-  true > "$won"; rm -f "$flag"   # `true`, not `:` — a redirect failure on a special builtin exits POSIX shells before || can run
+  true > "$res"; rm -f "$flag"   # `true`, not `:` — a redirect failure on a special builtin exits POSIX shells before || can run
   # The barrier spin must be BOUNDED. The flag is created below; if it can never appear —
   # the workdir was swept mid-round, the create failed, TMP was empty from the start — an
   # unbounded `while [ ! -f ]` burns one full core per racer forever while `wait` parks the
   # whole suite (observed: ~7 cores of busy-loop holding a conformance run for hours).
-  # A timed-out racer concedes the round, and a broken barrier returns ERR, so the suite
-  # reports FAIL and stops instead of hanging.
-  local i pids="" deadline=$(( SECONDS + 15 ))
+  local i pids="" deadline=$(( SECONDS + 60 ))
   for i in 1 2 3 4 5 6 7 8 9 10; do
     ( while [ ! -f "$flag" ]; do
         { [ -d "$TMP" ] && [ "$SECONDS" -lt "$deadline" ]; } || break
       done
-      [ -f "$flag" ] || { printf 'race: release flag never appeared\n' >&2; exit 1; }
-      "$fn" "$d" >/dev/null 2>&1 && printf 'win\n' >> "$won" ) &
+      [ -f "$flag" ] || { printf 'noflag\n' >> "$res"; exit 1; }
+      if "$fn" "$d" >/dev/null 2>&1; then printf 'win\n' >> "$res"; else printf 'lose\n' >> "$res"; fi ) &
     pids="$pids $!"
   done
   sleep 0.3          # let every racer reach the spin before the gun
@@ -137,10 +139,23 @@ _race_round() {   # <claim-fn> <dir> -> prints the number of winners, or ERR if 
     printf 'ERR'; return
   fi
   wait $pids
-  # won/flag disappearing under us means the workdir went away mid-round — that is a broken
+  # res/flag disappearing under us means the workdir went away mid-round — that is a broken
   # barrier, not a round with zero winners.
-  [ -f "$won" ] && [ -f "$flag" ] || { printf 'ERR'; return; }
-  grep -c 'win' "$won" || true   # -c prints 0 on no match (with exit 1); output is always a clean count
+  [ -f "$res" ] && [ -f "$flag" ] || { printf 'ERR'; return; }
+  local w a
+  w="$(grep -c '^win$' "$res")"; a="$(grep -cE '^(win|lose)$' "$res")"   # -c prints 0 on no match
+  printf '%s %s' "$w" "$a"
+}
+# _race_round_full <claim-fn> <dir-prefix> <round> -> like _race_round, but re-runs (fresh dir, up to 3
+# tries) a round in which not every racer attempted the claim; prints "WINNERS ATTEMPTS" of the last try.
+_race_round_full() {
+  local try out
+  for try in 1 2 3; do
+    out="$(_race_round "$1" "$2-$3-$try")"
+    [ "$out" = "ERR" ] && { printf 'ERR'; return; }
+    [ "${out#* }" = "10" ] && break
+  done
+  printf '%s' "$out"
 }
 
 # A deliberately non-atomic claim, used only to prove the assertion can fail. It must NOT create
@@ -150,15 +165,19 @@ _race_round() {   # <claim-fn> <dir> -> prints the number of winners, or ERR if 
 # the Windows exit-status problem by reaching for -p and losing the lock.
 _broken_claim() { [ -d "$1" ] && return 1; mkdir -p "$1" 2>/dev/null || return 1; return 0; }
 
-rounds=20; bad_rounds=0; barrier_broken=0
+rounds=20; bad_rounds=0; barrier_broken=0; short_rounds=0; bad_detail=""
 for r in $(seq 1 $rounds); do
-  n="$(_race_round _mkdir_claim "$TMP/race-$r")"
-  if [ "$n" = "ERR" ]; then bad "race barrier broken — release flag never appeared (round $r)"; barrier_broken=1; break; fi
-  [ "$n" = "1" ] || bad_rounds=$((bad_rounds+1))
+  out="$(_race_round_full _mkdir_claim "$TMP/race" "$r")"
+  if [ "$out" = "ERR" ]; then bad "race barrier broken — release flag never appeared (round $r)"; barrier_broken=1; break; fi
+  w="${out%% *}"; a="${out#* }"
+  if [ "$a" != "10" ]; then short_rounds=$((short_rounds+1)); continue; fi   # not every racer got to try, 3 times running
+  [ "$w" = "1" ] || { bad_rounds=$((bad_rounds+1)); bad_detail="$bad_detail round $r: $w winners of $a;"; }
 done
 if [ "$barrier_broken" -eq 0 ]; then
   [ "$bad_rounds" -eq 0 ] && ok "exactly one concurrent claimant wins, over $rounds contended rounds" \
-                          || bad "$bad_rounds/$rounds contended rounds did not produce exactly 1 winner"
+                          || bad "$bad_rounds/$rounds contended rounds did not produce exactly 1 winner:$bad_detail"
+  [ "$short_rounds" -eq 0 ] && ok "every contended round ran all 10 claimants" \
+                            || bad "$short_rounds/$rounds rounds could not get all 10 claimants to try, even on 3 tries (runner starved?)"
 fi
 
 # Control: the same harness must CATCH a non-atomic claim. If it cannot, the assertion above is
@@ -166,9 +185,9 @@ fi
 # a round with 0 winners (or a broken barrier) is not evidence the harness can distinguish anything.
 ctl_bad=0; ctl_barrier_broken=0
 for r in $(seq 1 $rounds); do
-  n="$(_race_round _broken_claim "$TMP/broken-$r")"
-  if [ "$n" = "ERR" ]; then bad "control: race barrier broken — release flag never appeared (round $r)"; ctl_barrier_broken=1; break; fi
-  [ "$n" -ge 2 ] && ctl_bad=$((ctl_bad+1))
+  out="$(_race_round_full _broken_claim "$TMP/broken" "$r")"
+  if [ "$out" = "ERR" ]; then bad "control: race barrier broken — release flag never appeared (round $r)"; ctl_barrier_broken=1; break; fi
+  [ "${out%% *}" -ge 2 ] && ctl_bad=$((ctl_bad+1))
 done
 if [ "$ctl_barrier_broken" -eq 0 ]; then
   [ "$ctl_bad" -gt 0 ] && ok "control: the race harness catches a non-atomic claim ($ctl_bad/$rounds rounds)" \
