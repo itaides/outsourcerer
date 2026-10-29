@@ -70,6 +70,13 @@ async function runAction(argv, btn) {
   finally { if (btn) { btn.disabled = false; if (btn.dataset.label) btn.textContent = btn.dataset.label; } }
 }
 let lastRun = null;
+let cccInfo = null;
+// "Open in CCC" for one session: a plain link to CCC's own ?session= deep link, only while CCC runs.
+function cccLink(sid, label = "Open in CCC ↗") {
+  if (!sid || !cccInfo || !cccInfo.running || !/^[A-Za-z0-9._-]+$/.test(sid)) return null;
+  return h("a", { class: "small", href: `${cccInfo.url}/?session=${encodeURIComponent(sid)}`, target: "_blank", rel: "noopener",
+    onclick: (e) => e.stopPropagation() }, label);
+}
 function showOutput(title, res) {
   drawerFor = null;
   drawerShell(title, res.ok ? "exit 0" : `exit ${res.exit}`,
@@ -106,7 +113,12 @@ function errBox(what, d) {
 
 // ---- chrome (top bar, nav badges) ----------------------------------------------------------------------
 async function chrome() {
-  const d = await many(["mode", "heartbeat", "inbox", "status", "brief"]);
+  const d = await many(["mode", "heartbeat", "inbox", "status", "brief", "ccc"]);
+  cccInfo = failed(d.ccc) ? null : d.ccc;
+  put($("ccc-link"), cccInfo && cccInfo.running
+    ? h("a", { class: "small", href: cccInfo.url, target: "_blank", rel: "noopener", title: "Claude Command Center (" + cccInfo.url + ")" }, "Command Center ↗")
+    : h("button", { class: "ghost small", type: "button", title: "Claude Command Center is not running here",
+        onclick: (e) => runAction(["outsourcerer", "ccc", "--start", "--print-url"], e.currentTarget) }, "Start Command Center"));
   if (!failed(d.mode)) {
     const label = { auto: "Auto-pilot", hybrid: "Hybrid", manual: "You-drive" }[d.mode.mode] || d.mode.mode || "Mode not set";
     $("mode-pill").textContent = label; $("mode-pill").title = d.mode.meaning || "";
@@ -227,7 +239,7 @@ SCREENS.needs = { every: 6, async render(v) {
             h("span", {}, "waiting " + ago(it.waiting_s)),
             it.deadline_s !== null && it.deadline_s !== undefined ? h("span", { class: "amber" }, `default ${it.default ? "(" + it.default + ") " : ""}in ${ago(it.deadline_s)}`) : null),
           h("div", { class: "cmd" }, cmdline(it.primary_action.argv))),
-        h("div", { class: "acts" }, actionButtons(it)))));
+        h("div", { class: "acts" }, actionButtons(it), cccLink(it.refs && it.refs.session_id)))));
   }
   const unk = ib.unknown.length ? h("details", { class: "card pad", style: "margin-top:16px" },
     h("summary", { class: "muted" }, `Can't tell (${ib.unknown.length}): sessions whose state is unknown. Not alerts.`),
@@ -290,8 +302,8 @@ SCREENS.live = { every: 5, async render(v) {
   const sess = sessAll.filter(sessFilter[liveTab]);
   const sessCard = failed(d.fleet) ? errBox("fleet", d.fleet) : sess.length ? h("section", { class: "card", style: "margin-top:16px" },
     h("div", { class: "pad" }, h("h2", {}, `Sessions (${sess.length})`), h("p", { class: "faint small" }, "Claude Code peers and steerable sessions the fleet sees. Click one to read its tail.")),
-    h("div", { class: "tbl" }, h("table", {}, h("thead", {}, h("tr", {}, ["Session", "Harness", "Model (requested → observed)", "State", "Last activity", "Repo"].map((c) => h("th", {}, c)))),
-      h("tbody", {}, sess.map((x) => h("tr", { class: "click", tabindex: 0,
+    h("div", { class: "tbl" }, h("table", {}, h("thead", {}, h("tr", {}, ["Session", "Harness", "Model (requested → observed)", "State", "Last activity", "Repo", "CCC"].map((c) => h("th", {}, c)))),
+      h("tbody", {}, sess.map((x) => h("tr", { class: "click", tabindex: 0, "data-ccc": x.session_id,
         onclick: () => runAction(["outsourcerer", "fleet", "show", x.session_id]), onkeydown: (e) => { if (e.key === "Enter") runAction(["outsourcerer", "fleet", "show", x.session_id]); } },
         h("td", {}, h("div", { class: "trunc" }, nz(x.display_name || x.task_summary, x.session_id)), h("div", { class: "mono faint" }, nz(x.session_id)),
           needSess.has(x.session_id) ? h("span", { class: "kind" }, "needs you") : null),
@@ -299,7 +311,8 @@ SCREENS.live = { every: 5, async render(v) {
         h("td", {}, modelCell(x.requested_model, x.observed_model)),
         h("td", { class: x.state === "blocked" ? "red" : (x.state === "blocked?" || x.state === "unresponsive?") ? "amber" : "" }, nz(x.state_label || x.state)),
         h("td", { class: "mono" }, x.status_age !== null && x.status_age !== undefined ? ago(x.status_age) + " ago" : "—"),
-        h("td", {}, nz(repoOf(x.cwd))))))))) : null;
+        h("td", {}, nz(repoOf(x.cwd))),
+        h("td", {}, cccLink(x.session_id, "Open ↗") || h("span", { class: "faint" }, "—")))))))) : null;
   // Groups: fanout / crew runs, one row each with their summary counts.
   const groups = failed(d.fanouts) ? [] : d.fanouts.groups.filter((g) => {
     const run = g.summary && g.summary.running > 0;
@@ -642,6 +655,9 @@ SCREENS.settings = { every: 30, async render(v) {
     sec("Supervision", "The heartbeat watches delegated runs while you are away.", failed(d.heartbeat) ? errBox("heartbeat", d.heartbeat)
       : h("p", {}, d.heartbeat.armed ? `Armed (pid ${d.heartbeat.pid})` : "Not armed. ", d.heartbeat.armed ? null :
         runBtn("Arm the heartbeat", ["outsourcerer", "heartbeat", "start"]))),
+    sec("Command Center", "Claude Command Center, the separate CCC app. Sessions link into it.",
+      cccInfo && cccInfo.running ? h("p", {}, "Running at ", h("a", { href: cccInfo.url, target: "_blank", rel: "noopener", class: "mono" }, cccInfo.url))
+        : h("p", {}, "Not running. ", runBtn("Start Command Center", ["outsourcerer", "ccc", "--start", "--print-url"]))),
     sec("This dashboard", "Local only. No telemetry.", h("dl", { class: "facts" },
       h("dt", {}, "Address"), h("dd", { class: "mono" }, location.host),
       h("dt", {}, "Token"), h("dd", { class: "mono" }, failed(d.doctor) ? "<state home>/dash/token" : `${d.doctor.state_home.path}/dash/token (0600)`),

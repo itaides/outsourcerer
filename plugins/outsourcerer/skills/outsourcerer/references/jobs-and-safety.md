@@ -352,6 +352,15 @@ redaction as `explain`.
 `status --json`, `fleet ls --json`, `fanout status --json`, `classify --json`, `advise --json` and the
 factory `plan`/`task` `--json` forms are documented with their commands.
 
+## Claude Command Center (`outsourcerer ccc`)
+
+`outsourcerer ccc [<session-id>] [--start] [--print-url] [--json]` opens Claude Command Center (CCC, the
+separate app, not anything in this repo) in the browser. The address comes from `$CCC_SERVER`, else
+the `~/.claude/command-center/port.txt` CCC publishes, and must be a loopback `http(s)` address. With a
+session id it opens CCC's `?session=<id>` deep link; fleet session ids are CCC's ids. `--start` runs
+`ccc` (which launches the server) when nothing answers and waits `OSRC_CCC_START_WAIT` seconds
+(default 30). `--json` never opens or starts anything.
+
 ## Dashboard (`outsourcerer dash`)
 
 `outsourcerer dash [--port N]` serves a local dashboard in the foreground (Ctrl-C stops it) and prints
@@ -371,7 +380,7 @@ its sign-in URL; `--print-url` prints the URL and exits. It needs `python3` (sta
 - **Actions behind one door.** `POST /api/run` with `{"argv": [...]}` runs one action, only when the argv
   matches a fixed shape: `task release <tN> --plan <p> --answer <text>`, `cancel|watch|explain|result
   <job>`, `fleet show <session>`, `heartbeat start`, `mode auto|hybrid|manual`, `exclude add|rm <model>`,
-  `consent grant|revoke`, `tap install`, `posture reset`. Values are validated (ids, model names that cannot start with
+  `consent grant|revoke`, `tap install`, `posture reset`, `ccc --start --print-url`. Values are validated (ids, model names that cannot start with
   `-`, answers up to 2000 characters) and passed as argv elements, never through a shell. The request
   also needs the `X-Osrc-Dash: 1` header and a JSON content type, which a cross-site form cannot send.
   The output is redacted with the same patterns as `explain`, and the read cache is cleared. The page

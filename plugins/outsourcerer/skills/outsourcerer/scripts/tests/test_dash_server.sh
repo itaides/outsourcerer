@@ -107,6 +107,8 @@ printf 'j-dash\tfirst\n' > "$OSRC_HOME/fanout/g-1/members.tsv"; printf 'codex ru
   && ok "GET /api/fanouts is fanout list --json" || bad "fanouts: $(cat "$TMP/body")"
 [ "$(code "${A[@]}" "$B/api/fanout/g-1")" = 200 ] && jq -e '.fanout_id == "g-1" and .jobs[0].job_id == "j-dash"' "$TMP/body" >/dev/null && ok "GET /api/fanout/<id> is fanout status <id> --json" || bad "fanout: $(cat "$TMP/body")"
 
+[ "$(code "${A[@]}" "$B/api/ccc")" = 200 ] && jq -e 'has("url") and has("running")' "$TMP/body" >/dev/null && ok "GET /api/ccc is ccc --json" || bad "ccc endpoint: $(cat "$TMP/body")"
+
 # methods and static files
 [ "$(code -X POST "${A[@]}" "$B/api/mode")" = 403 ] && ok "a bare POST is refused (actions live behind POST /api/run)" || bad "POST not refused"
 [ "$(code -X DELETE "${A[@]}" "$B/api/mode")" = 405 ] && ok "DELETE -> 405" || bad "DELETE not refused"

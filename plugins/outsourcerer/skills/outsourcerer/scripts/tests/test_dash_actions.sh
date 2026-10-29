@@ -84,6 +84,10 @@ printf '{"id":"t1","title":"pick a store","state":"held","shape":"scout","deps":
 jq -e '.hold.answer == "SQLite; drop table x" and .state != "held"' "$OSRC_HOME/plans/rl/tasks/t1.json" >/dev/null \
   && ok "the answer is stored verbatim (an argv element, never shell)" || bad "answer: $(cat "$OSRC_HOME/plans/rl/tasks/t1.json")"
 
+for argv in '["ccc"]' '["ccc","--start"]' '["ccc","--start","--print-url","x"]'; do
+  [ "$(post "{\"argv\":$argv}")" = 403 ] && ok "refused: $argv" || bad "allowed: $argv"
+done
+
 # posture reset clears remembered postures
 mkdir -p "$OSRC_HOME/lane-posture"; printf 'refused\n' > "$OSRC_HOME/lane-posture/dv.yolo"
 [ "$(post '{"argv":["posture","reset"]}')" = 200 ] && jq -e .ok "$TMP/body" >/dev/null && [ ! -e "$OSRC_HOME/lane-posture/dv.yolo" ] \

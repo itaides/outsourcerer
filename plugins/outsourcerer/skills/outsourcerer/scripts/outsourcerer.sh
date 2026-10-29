@@ -51,6 +51,7 @@
 #   explain <job-id>               Diagnose a job's terminal state: state + persisted reason +
 #                                  last OSRC:: marker + the _classify_job routing verdict. Degrades
 #                                  gracefully (missing jq/meta/reason -> "(not recorded)").
+#   ccc [<session>] [--start]      Open Claude Command Center (the CCC app) in the browser, at a session if given.
 #   dash [--port N] [--print-url]  Local dashboard on 127.0.0.1:8091 (token in ~/.outsourcerer/dash/token).
 #   inbox [--json]                 What needs you now: blocked/waiting sessions and jobs, held decisions,
 #                                  model drift, undelivered messages. One row each, one action each.
@@ -9406,6 +9407,78 @@ _inbox_inputs() {
   jq -cn --argjson now "$now" --argjson win "${OSRC_INBOX_WINDOW_S:-86400}" --argjson s "$sessions" \
     --argjson j "$jobs" --argjson t "$tasks" --argjson o "$obl" \
     '{now:$now, window_s:$win, sessions:$s, jobs:$j, tasks:$t, obligations:$o}'
+}
+
+# ---- ccc: open Claude Command Center ----------------------------------------------------------------
+# CCC is a separate app (not this repo). Its server publishes its address in
+# ~/.claude/command-center/port.txt; the `ccc` client resolves it the same way: $CCC_SERVER first,
+# then that file. Only a loopback http(s) address is accepted, so a stray value can never send the
+# browser somewhere else. A session deep link is <ccc>/?session=<id>.
+_ccc_url() {
+  local u="${CCC_SERVER:-}" f="${OSRC_CCC_PORT_FILE:-$HOME/.claude/command-center/port.txt}"
+  if [ -z "$u" ] && [ -f "$f" ] && [ ! -L "$f" ]; then u="$(head -1 "$f" 2>/dev/null | tr -d '[:space:]')"; fi
+  u="${u%/}"
+  case "$u" in
+    http://127.0.0.1:[0-9]*|http://localhost:[0-9]*|https://127.0.0.1:[0-9]*|https://localhost:[0-9]*) ;;
+    *) return 1 ;;
+  esac
+  case "${u#*://*:}" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$u"
+}
+_ccc_up() { have curl && curl -s -o /dev/null --max-time 3 "$1/" 2>/dev/null; }
+_open_in_browser() {
+  case "$OSRC_PLATFORM" in
+    mac)     open "$1" ;;
+    windows) cmd.exe /c start "" "$1" ;;
+    *)       if have xdg-open; then xdg-open "$1" >/dev/null 2>&1; else return 1; fi ;;
+  esac
+}
+
+# cmd_ccc [<session-id>] [--start] [--print-url] [--json] -> open Claude Command Center in the browser,
+# at one session when an id is given. --start launches CCC (`ccc` with no subcommand) when it is not
+# answering and waits up to OSRC_CCC_START_WAIT seconds (default 30). --print-url prints instead of
+# opening; --json prints {url, session_url, running} and never opens or starts anything.
+cmd_ccc() {
+  local sid="" start=0 print=0 json=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --start) start=1 ;;
+      --print-url) print=1 ;;
+      --json) json=1 ;;
+      -*) die "ccc: unknown option '$1' (use [<session-id>] --start --print-url --json)" ;;
+      *) [ -z "$sid" ] || die "ccc takes one session id"; sid="$1" ;;
+    esac
+    shift
+  done
+  case "$sid" in *[!A-Za-z0-9._-]*|.*) die "ccc: bad session id '$sid'" ;; esac
+  local url running=false
+  url="$(_ccc_url)" || url=""
+  [ -n "$url" ] && _ccc_up "$url" && running=true
+  if [ "$json" = 1 ]; then
+    _json_need_jq ccc
+    jq -cn --arg u "$url" --arg s "$sid" --argjson r "$running" \
+      '{schema_version:"1", url:(if $u == "" then null else $u end),
+        session_url:(if $u == "" or $s == "" then null else ($u + "/?session=" + $s) end), running:$r}'
+    return 0
+  fi
+  if [ "$running" != true ] && [ "$start" = 1 ]; then
+    have ccc || die "ccc: Claude Command Center is not installed (no 'ccc' on PATH)"
+    echo "ccc: starting Claude Command Center…" >&2
+    ( nohup ccc >/dev/null 2>&1 & ) 2>/dev/null
+    local waited=0 lim="${OSRC_CCC_START_WAIT:-30}"; case "$lim" in ''|*[!0-9]*) lim=30 ;; esac
+    while [ "$waited" -lt "$lim" ]; do
+      url="$(_ccc_url)" && [ -n "$url" ] && _ccc_up "$url" && { running=true; break; }
+      sleep 1; waited=$((waited + 1))
+    done
+  fi
+  if [ "$running" != true ]; then
+    if [ -z "$url" ]; then die "ccc: Claude Command Center is not running (no address in \$CCC_SERVER or ~/.claude/command-center/port.txt). Start it with: $0 ccc --start"; fi
+    die "ccc: Claude Command Center is not answering at $url. Start it with: $0 ccc --start"
+  fi
+  [ -n "$sid" ] && url="$url/?session=$sid"
+  if [ "$print" = 1 ]; then printf '%s\n' "$url"; return 0; fi
+  _open_in_browser "$url" || die "ccc: could not open a browser; the address is $url"
+  echo "ccc: opened $url"
 }
 
 # cmd_dash [--port N] [--print-url] -> serve the local dashboard (scripts/dashboard/server.py) in the
@@ -22254,7 +22327,8 @@ main() {
     tab)         cmd_tab "$@" ;;
     outcomes)    cmd_outcomes "$@" ;;
     inbox)       cmd_inbox "$@" ;;
-    dash)        cmd_dash "$@" ;;                          # local dashboard on 127.0.0.1 (token-gated, read-only)                         # what needs you right now: one row per session/job/decision, one action each                      # what delegated work achieved: verified rate, lane x model x task class                           # the Tab: ledger / savings summary
+    dash)        cmd_dash "$@" ;;
+    ccc)         cmd_ccc "$@" ;;                           # open Claude Command Center (the CCC app), optionally at one session                          # local dashboard on 127.0.0.1 (token-gated, read-only)                         # what needs you right now: one row per session/job/decision, one action each                      # what delegated work achieved: verified rate, lane x model x task class                           # the Tab: ledger / savings summary
     sanitize)    cmd_sanitize "$@" ;;                      # scrub fallback-trigger vocab from prose/state/commit files (--write applies)
     estimate)    cmd_estimate "$@" ;;                      # quote table across the chain + Opus
     suggest|deals) cmd_suggest "$@" ;;                     # live low-cash and plan-included models
