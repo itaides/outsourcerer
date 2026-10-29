@@ -121,8 +121,9 @@ printf '%s' "$h" | grep -qi '^x-content-type-options: nosniff' && ok "nosniff he
 # --- stale-while-revalidate: a slow read is served from cache at once, then refreshed in the background ---
 LOG2="$TMP/server2.log"
 OSRC_DASH_TTL=1 OSRC_DASH_MAX_STALE=6 OSRC_DASH_NO_WARM=1 python3 "$SRV" --cli "$SRC" --home "$OSRC_HOME" --port 0 > "$LOG2" 2>/dev/null & PID2=$!
-for _ in $(seq 1 50); do grep -q 'dash: open' "$LOG2" 2>/dev/null && break; sleep 0.1; done
+for _ in $(seq 1 300); do grep -q 'dash: open' "$LOG2" 2>/dev/null && break; sleep 0.1; done   # up to 30 s: a loaded CI runner starts it slowly
 P2="$(sed -n 's#^dash: open http://127.0.0.1:\([0-9]*\)/.*#\1#p' "$LOG2")"
+[ -n "$P2" ] && ok "the caching test's server started" || bad "the caching test's server never started; the checks below cannot run"
 B2="http://127.0.0.1:$P2"
 hdr() { curl -s -D "$TMP/h2" -o "$TMP/b2" "${A[@]}" "$B2/api/mode"; }
 OSRC_HOME="$OSRC_HOME" bash "$SRC" mode auto >/dev/null 2>&1
