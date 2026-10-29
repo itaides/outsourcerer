@@ -118,7 +118,7 @@ _race_round() {   # <claim-fn> <dir> -> "WINNERS ATTEMPTS", or ERR if the barrie
   # A missing/empty TMP lands res/flag at the filesystem root — report a broken barrier
   # rather than racing on stray files (or spinning forever where they cannot be created).
   [ -n "${TMP:-}" ] && [ -d "$TMP" ] || { printf 'ERR'; return; }
-  true > "$res"; rm -f "$flag"   # `true`, not `:` — a redirect failure on a special builtin exits POSIX shells before || can run
+  true > "$res"; true > "$res.who"; rm -f "$flag"   # `true`, not `:` — a redirect failure on a special builtin exits POSIX shells before || can run
   # The barrier spin must be BOUNDED. The flag is created below; if it can never appear —
   # the workdir was swept mid-round, the create failed, TMP was empty from the start — an
   # unbounded `while [ ! -f ]` burns one full core per racer forever while `wait` parks the
@@ -129,7 +129,7 @@ _race_round() {   # <claim-fn> <dir> -> "WINNERS ATTEMPTS", or ERR if the barrie
         { [ -d "$TMP" ] && [ "$SECONDS" -lt "$deadline" ]; } || break
       done
       [ -f "$flag" ] || { printf 'noflag\n' >> "$res"; exit 1; }
-      if "$fn" "$d" >/dev/null 2>&1; then printf 'win\n' >> "$res"; else printf 'lose\n' >> "$res"; fi ) &
+      if "$fn" "$d" 2>"$d.err.$i"; then printf 'win\n' >> "$res"; printf '%s\n' "$i" >> "$res.who"; else printf 'lose\n' >> "$res"; fi ) &
     pids="$pids $!"
   done
   sleep 0.3          # let every racer reach the spin before the gun
@@ -144,6 +144,14 @@ _race_round() {   # <claim-fn> <dir> -> "WINNERS ATTEMPTS", or ERR if the barrie
   [ -f "$res" ] && [ -f "$flag" ] || { printf 'ERR'; return; }
   local w a
   w="$(grep -c '^win$' "$res")"; a="$(grep -cE '^(win|lose)$' "$res")"   # -c prints 0 on no match
+  # Two winners should be impossible (mkdir is atomic). If CI ever shows it, keep the evidence: who won,
+  # what they printed, the directory's inode and the filesystem, so the next run explains itself.
+  if [ "$w" != "1" ] && [ "$a" = "10" ]; then
+    { echo "--- race evidence: $w winners of $a on $d"; echo "winners: $(tr '\n' ' ' < "$res.who")"
+      for i in $(cat "$res.who"); do echo "racer $i stderr: $(head -c 300 "$d.err.$i" 2>/dev/null)"; done
+      ls -lid "$d" 2>&1; stat "$d" 2>&1 | head -4; df -T "$d" 2>/dev/null || df "$d" 2>&1; mkdir --version 2>/dev/null | head -1
+      echo "type of mkdir: $(type -a mkdir 2>&1 | tr '\n' ';')"; } >> "$TMP/race-evidence.log" 2>&1
+  fi
   printf '%s %s' "$w" "$a"
 }
 # _race_round_full <claim-fn> <dir-prefix> <round> -> like _race_round, but re-runs (fresh dir, up to 3
@@ -175,7 +183,7 @@ for r in $(seq 1 $rounds); do
 done
 if [ "$barrier_broken" -eq 0 ]; then
   [ "$bad_rounds" -eq 0 ] && ok "exactly one concurrent claimant wins, over $rounds contended rounds" \
-                          || bad "$bad_rounds/$rounds contended rounds did not produce exactly 1 winner:$bad_detail"
+                          || { bad "$bad_rounds/$rounds contended rounds did not produce exactly 1 winner:$bad_detail"; sed 's/^/      | /' "$TMP/race-evidence.log" 2>/dev/null; }
   [ "$short_rounds" -eq 0 ] && ok "every contended round ran all 10 claimants" \
                             || bad "$short_rounds/$rounds rounds could not get all 10 claimants to try, even on 3 tries (runner starved?)"
 fi
