@@ -1482,7 +1482,7 @@ cmd_flow() {
   local sub="${1:-}"; shift || true
   _ff_need_jq
   case "$sub" in
-    ls|list)   _ff_flow_ls ;;
+    ls|list)   _ff_flow_ls "$@" ;;
     show)      [ -n "${1:-}" ] || die "usage: flow show <name>"; _ff_flow_show "$1" ;;
     run)       _ff_flow_run "$@" ;;
     ""|-h|--help|help)
@@ -1498,7 +1498,8 @@ EOF
 }
 
 _ff_flow_ls() {
-  local d f name seen="" src
+  local d f name seen="" src json=0 items="[]"
+  case "${1:-}" in --json) json=1 ;; "") ;; *) die "flow ls: unknown option '$1' (use --json)" ;; esac
   while IFS= read -r d; do
     [ -d "$d" ] || continue
     for f in "$d"/*.json; do
@@ -1508,11 +1509,19 @@ _ff_flow_ls() {
       case " $seen " in *" $name "*) continue ;; esac
       seen="$seen $name"
       src="built-in"; [ "$d" = "$OSRC_HOME/flows" ] && src="yours"
+      if [ "$json" = 1 ]; then
+        items="$(_ff_jq -c --arg n "$name" --arg s "$src" --slurpfile f "$f" \
+          '. + [{name:$n, source:$s, description:(($f[0].description // "") | tostring | gsub("[[:cntrl:]]"; " ") | if . == "" then null else . end),
+                 vars:(($f[0].vars // {}) | keys), stages:(($f[0].stages // []) | length)}]' <<<"$items" 2>/dev/null)" \
+          || items="$(_ff_jq -c --arg n "$name" --arg s "$src" '. + [{name:$n, source:$s, description:null, vars:[], stages:null, unreadable:true}]' <<<"$items")"
+        continue
+      fi
       printf '%-16s %-8s %s\n' "$name" "$src" "$(_ff_jq -r '.description // "" | tostring | gsub("[[:cntrl:]]"; " ") | .[0:110]' "$f" 2>/dev/null || echo '(unreadable)')"
     done
   done <<EOF
 $(_ff_flow_dirs)
 EOF
+  if [ "$json" = 1 ]; then _ff_jq -cn --argjson f "$items" '{schema_version:"1", flows:$f}'; return 0; fi
   [ -n "$seen" ] || echo "no flows found"
 }
 

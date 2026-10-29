@@ -951,6 +951,24 @@ _plan_cli_ls() {
   local root d n cur="" pj counts
   root="$(_plans_root)"
   cur="$(_plan_current 2>/dev/null)" || cur=""
+  if [ "${1:-}" = "--json" ]; then
+    # Every plan with its plan.json fields and task counts per derived state (same buckets as the text).
+    local items="[]" view
+    for d in "$root"/*/; do
+      [ -f "$d/plan.json" ] || continue
+      n="$(basename "$d")"
+      pj="$(_ft_jq -c . "$d/plan.json" 2>/dev/null)" || pj='{"damaged":true}'
+      view="$(_task_view "$n" 2>/dev/null)"; [ -n "$view" ] || view="[]"
+      items="$(_ft_jq -c --arg n "$n" --arg cur "$cur" --argjson p "$pj" --argjson v "$view" \
+        '. + [{name:$n, current:($n == $cur), goal:($p.goal // null), repo:($p.repo // null),
+               base_branch:($p.base_branch // null), created:($p.created // null), updated:($p.updated // null),
+               damaged:($p.damaged // false), tasks:($v | length),
+               counts:($v | group_by(.derived) | map({key:.[0].derived, value:length}) | from_entries)}]' <<<"$items")" || return 1
+    done
+    _ft_jq -cn --argjson p "$items" --arg cur "$cur" '{schema_version:"1", current:(if $cur == "" then null else $cur end), plans:$p}'
+    return 0
+  fi
+  [ $# -eq 0 ] || die "plan ls: unknown option '$1' (use --json)"
   local any=0
   for d in "$root"/*/; do
     [ -f "$d/plan.json" ] || continue
