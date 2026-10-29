@@ -96,7 +96,7 @@ printf 'OSRC::PROGRESS 1/1 token=abcd1234efgh5678\nOSRC::DONE\n' > "$jd/out.log"
 [ "$(code "${A[@]}" "$B/api/job/no-such-job")" != 200 ] && ok "an unknown job is not a 200" || bad "unknown job returned 200"
 
 # methods and static files
-[ "$(code -X POST "${A[@]}" "$B/api/mode")" = 405 ] && ok "POST -> 405 (read-only)" || bad "POST not refused"
+[ "$(code -X POST "${A[@]}" "$B/api/mode")" = 403 ] && ok "a bare POST is refused (actions live behind POST /api/run)" || bad "POST not refused"
 [ "$(code -X DELETE "${A[@]}" "$B/api/mode")" = 405 ] && ok "DELETE -> 405" || bad "DELETE not refused"
 h="$(curl -s -D - -o "$TMP/body" "${A[@]}" "$B/")"
 grep -q 'Outsourcerer' "$TMP/body" && ok "serves the page" || bad "no page"

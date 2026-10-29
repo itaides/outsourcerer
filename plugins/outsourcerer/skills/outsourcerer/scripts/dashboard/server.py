@@ -11,8 +11,11 @@ Safety, in order:
     as `Authorization: Bearer <token>` or the cookie set by visiting /?token=<token> once;
   - the Host header must name this loopback address, so a page on another site cannot reach the
     server through a DNS name that resolves to 127.0.0.1;
-  - only GET/HEAD in this version; path parameters are validated against a strict pattern and
-    passed as separate argv elements;
+  - GET reads run allow-listed --json commands; path parameters are validated against a strict
+    pattern and passed as separate argv elements;
+  - POST /api/run runs one action, and only when its argv matches an ACTIONS shape exactly (fixed
+    words plus validated values). POSTs also need the X-Osrc-Dash header and a JSON body, which a
+    cross-site form cannot send; the output is redacted before it is returned;
   - the request log never prints a query string (it can hold the token).
 
 Standard library only, Python 3.8+.
@@ -94,6 +97,62 @@ ENDPOINTS = {
     "advise":     (_task_text("advise"), 30, "json"),
 }
 
+# Actions the page may run, as argv shapes after `outsourcerer`. A literal must match exactly; a
+# placeholder names the validator for that position. Nothing else can be run, and never via a shell.
+MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$")
+VALIDATORS = {
+    "{job}":    lambda v: bool(ID_RE.match(v)) and ".." not in v,
+    "{task}":   lambda v: bool(re.match(r"^t[0-9]{1,6}$", v)),
+    "{plan}":   lambda v: bool(ID_RE.match(v)) and ".." not in v,
+    "{answer}": lambda v: 0 < len(v) <= 2000 and "\x00" not in v,
+    "{model}":  lambda v: bool(MODEL_RE.match(v)),
+    "{sel}":    lambda v: bool(ID_RE.match(v)) and ".." not in v,
+}
+ACTIONS = [
+    ["task", "release", "{task}", "--plan", "{plan}", "--answer", "{answer}"],
+    ["cancel", "{job}"],
+    ["watch", "{job}"],
+    ["explain", "{job}"],
+    ["result", "{job}"],
+    ["fleet", "show", "{sel}"],
+    ["heartbeat", "start"],
+    ["mode", "auto"], ["mode", "hybrid"], ["mode", "manual"],
+    ["exclude", "add", "{model}"], ["exclude", "rm", "{model}"],
+    ["consent", "grant"], ["consent", "revoke"],
+    ["tap", "install"],
+]
+ACTION_TIMEOUT = int(os.environ.get("OSRC_DASH_ACTION_TIMEOUT", "60"))
+
+# The same secret patterns as the CLI's _explain_redact, applied to action output before it leaves.
+REDACT = [
+    (re.compile(r"sk-[A-Za-z0-9_-]{8,}"), "[REDACTED-KEY]"),
+    (re.compile(r"Bearer [A-Za-z0-9._~+/=-]{8,}"), "[REDACTED-BEARER]"),
+    (re.compile(r"xox[bp]-[A-Za-z0-9-]{8,}"), "[REDACTED-SLACK]"),
+    (re.compile(r"gh[pousr]_[A-Za-z0-9]{8,}"), "[REDACTED-GITHUB]"),
+    (re.compile(r"AKIA[0-9A-Z]{16}"), "[REDACTED-AWS]"),
+    (re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)[^/:@\s]+:[^/@\s]+@"), r"\1[REDACTED-AUTH]@"),
+    (re.compile(r"((?i:api[-_]?key|token|secret|pass(?:word|wd)?|authorization))(\s*[=:]\s*\"?)([^\s\"]{4,})"), r"\1\2[REDACTED]"),
+]
+
+
+def redact(text):
+    for rx, rep in REDACT:
+        text = rx.sub(rep, text)
+    return text
+
+
+def action_allowed(argv):
+    """True when argv (after `outsourcerer`) matches one ACTIONS shape exactly."""
+    if not isinstance(argv, list) or not all(isinstance(a, str) for a in argv):
+        return False
+    for shape in ACTIONS:
+        if len(shape) != len(argv):
+            continue
+        if all((VALIDATORS[w](a) if w in VALIDATORS else w == a) for w, a in zip(shape, argv)):
+            return True
+    return False
+
+
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
        "connect-src 'self'; base-uri 'none'; form-action 'none'; "
        "frame-ancestors 'self' http://127.0.0.1:* http://localhost:*")
@@ -157,6 +216,20 @@ class Runner:
             if res[0] == 200:
                 self.cache[key] = (time.time(),) + res
             return res
+
+
+def run_action(runner, argv):
+    env = dict(os.environ, OSRC_HOME=runner.home, OSRC_BLIND_TURN_GUARD="0", NO_COLOR="1")
+    try:
+        p = subprocess.run(["bash", runner.cli] + argv, stdin=subprocess.DEVNULL, capture_output=True,
+                           timeout=ACTION_TIMEOUT, env=env)
+        rc, out, err = p.returncode, p.stdout, p.stderr
+    except subprocess.TimeoutExpired as e:
+        rc, out, err = None, e.stdout or b"", (e.stderr or b"") + b"\n(the action timed out)"
+    with runner.guard:
+        runner.cache.clear()  # whatever the action changed shows on the next read
+    clip = lambda b: redact(b.decode("utf-8", "replace"))[-8000:]
+    return {"command": ["outsourcerer"] + argv, "exit": rc, "ok": rc == 0, "stdout": clip(out), "stderr": clip(err)}
 
 
 def _parse_json(text):
@@ -269,10 +342,35 @@ def make_handler(token, runner, port):
                 ctype += "; charset=utf-8"
             self._send(200, ctype, body)
 
-        def _refuse(self):
-            self._json(405, {"error": "read-only: this dashboard version runs no actions"})
+        def do_POST(self):
+            if self.headers.get("Host", "") not in allowed_hosts:
+                return self._json(403, {"error": "this server only answers on its loopback address"})
+            if not self._authed():
+                return self._json(401, {"error": "token required"})
+            if self.headers.get("X-Osrc-Dash") != "1" or not self.headers.get("Content-Type", "").startswith("application/json"):
+                return self._json(403, {"error": "actions need the X-Osrc-Dash header and a JSON body"})
+            if urlsplit(self.path).path != "/api/run":
+                return self._json(404, {"error": "the only action endpoint is POST /api/run"})
+            try:
+                n = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                n = -1
+            if not (0 < n <= 16384):
+                return self._json(400, {"error": "body missing or too large"})
+            try:
+                argv = json.loads(self.rfile.read(n).decode("utf-8")).get("argv")
+            except (ValueError, AttributeError, UnicodeDecodeError):
+                return self._json(400, {"error": "body must be JSON: {\"argv\": [...]}"})
+            if isinstance(argv, list) and argv[:1] == ["outsourcerer"]:
+                argv = argv[1:]
+            if not action_allowed(argv):
+                return self._json(403, {"error": "this command is not an allowed action", "command": argv})
+            self._json(200, run_action(runner, argv))
 
-        do_POST = do_PUT = do_DELETE = do_PATCH = _refuse
+        def _refuse(self):
+            self._json(405, {"error": "use GET to read and POST /api/run for actions"})
+
+        do_PUT = do_DELETE = do_PATCH = _refuse
 
     return Handler
 

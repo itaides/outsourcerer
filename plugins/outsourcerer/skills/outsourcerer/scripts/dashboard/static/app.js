@@ -44,6 +44,35 @@ async function copy(text) {
   catch (e) { toast("Copy failed; the command is: " + text); }
 }
 
+// Run one allow-listed action through the server (POST /api/run). Destructive ones ask for a second
+// click on the same button instead of a browser dialog.
+const DESTRUCTIVE = (argv) => argv[1] === "cancel" || (argv[1] === "consent" && argv[2] === "revoke");
+async function runAction(argv, btn) {
+  if (btn && DESTRUCTIVE(argv) && btn.dataset.armed !== "1") {
+    btn.dataset.armed = "1"; btn.dataset.label = btn.textContent; btn.textContent = "Click again to confirm";
+    setTimeout(() => { if (btn.dataset.armed === "1") { btn.dataset.armed = ""; btn.textContent = btn.dataset.label; } }, 4000);
+    return null;
+  }
+  if (btn) { btn.dataset.armed = ""; btn.disabled = true; }
+  try {
+    const r = await fetch("/api/run", { method: "POST", credentials: "same-origin",
+      headers: { "Content-Type": "application/json", "X-Osrc-Dash": "1" }, body: JSON.stringify({ argv }) });
+    const res = await r.json();
+    if (!r.ok) { toast(res.error || `HTTP ${r.status}`); return res; }
+    const first = (res.ok ? res.stdout : res.stderr || res.stdout || "").trim().split("\n").filter(Boolean).slice(-1)[0] || "";
+    toast((res.ok ? "Done: " : `Failed (exit ${res.exit}): `) + cmdline(argv) + (first ? " · " + first.slice(0, 160) : ""));
+    lastRun = res;
+    refresh();
+    return res;
+  } catch (e) { toast("Could not run: " + e.message); return null; }
+  finally { if (btn) { btn.disabled = false; if (btn.dataset.label) btn.textContent = btn.dataset.label; } }
+}
+let lastRun = null;
+const runBtn = (label, argv, cls = "btn small") => h("button", { class: cls, type: "button", title: cmdline(argv),
+  onclick: (e) => runAction(argv, e.currentTarget) }, label);
+const copyBtn = (argv) => h("button", { class: "ghost small", type: "button", "aria-label": "Copy command", title: "Copy: " + cmdline(argv),
+  onclick: () => copy(cmdline(argv)) }, "⧉");
+
 // ---- data ------------------------------------------------------------------------------------------
 const cache = {};
 async function api(path) {
@@ -71,7 +100,7 @@ function errBox(what, d) {
 async function chrome() {
   const d = await many(["mode", "heartbeat", "inbox", "status", "brief"]);
   if (!failed(d.mode)) {
-    const label = { auto: "Auto-pilot", hybrid: "Hybrid", manual: "You-drive" }[d.mode.mode] || d.mode.mode;
+    const label = { auto: "Auto-pilot", hybrid: "Hybrid", manual: "You-drive" }[d.mode.mode] || d.mode.mode || "Mode not set";
     $("mode-pill").textContent = label; $("mode-pill").title = d.mode.meaning || "";
   }
   if (!failed(d.heartbeat)) {
@@ -133,7 +162,7 @@ function actionButtons(item) {
     if (!a) return;
     const needsInput = a.input === "answer";
     const btn = h("button", { class: primary ? "pbtn small" : "btn small", type: "button",
-      title: "Copies the exact command: " + cmdline(a.argv),
+      title: "Runs: " + cmdline(a.argv),
       onclick: () => {
         let argv = a.argv;
         if (needsInput) {
@@ -142,13 +171,14 @@ function actionButtons(item) {
           if (!v) { field && field.focus(); toast("Type your answer first"); return; }
           argv = argv.map((x) => (x === "{answer}" ? v : x));
         }
-        copy(cmdline(argv));
+        runAction(argv, btn);
       } }, a.label);
     if (needsInput) out.push(h("input", { type: "text", placeholder: "your answer", "aria-label": "Answer for " + item.title, size: 18 }));
     out.push(btn);
   };
   one(item.primary_action, true);
   one(item.secondary_action, false);
+  out.push(copyBtn(item.primary_action.argv));
   return out;
 }
 function kindLabel(k) {
@@ -276,16 +306,23 @@ async function openJob(id, quiet) {
     h("section", {}, h("h2", {}, "Log tail (secrets masked)"),
       failed(d[`logs/${id}`]) ? errBox("logs", d[`logs/${id}`]) : h("div", { class: "log" }, d[`logs/${id}`] || "(empty)")),
     h("div", { style: "display:flex;gap:8px;flex-wrap:wrap" },
-      !terminal ? h("button", { class: "btn small", type: "button", onclick: () => copy(cmdline(["outsourcerer", "watch", id])) }, "Copy: watch") : null,
-      !terminal ? h("button", { class: "btn small", type: "button", onclick: () => copy(cmdline(["outsourcerer", "cancel", id])) }, "Copy: cancel") : null,
-      h("button", { class: "btn small", type: "button", onclick: () => copy(cmdline(["outsourcerer", "result", id])) }, "Copy: result")));
+      !terminal ? runBtn("Watch", ["outsourcerer", "watch", id]) : null,
+      !terminal ? runBtn("Cancel", ["outsourcerer", "cancel", id]) : null,
+      h("button", { class: "btn small", type: "button", onclick: async (e) => {
+        const r = await runAction(["outsourcerer", "result", id], e.currentTarget);
+        if (r && r.stdout !== undefined) { const box = $("drawer").querySelector(".result-box"); if (box) { box.hidden = false; box.textContent = r.stdout || "(empty)"; } }
+      } }, "Show result"),
+      copyBtn(["outsourcerer", "result", id])),
+    h("div", { class: "log result-box", hidden: true }));
 }
 async function openLoop(l) {
   drawerFor = null;
   const d = await many([`loop/${l.loop_id}`]);
   const x = failed(d[`loop/${l.loop_id}`]) ? l : (d[`loop/${l.loop_id}`].loops[0] || l);
   const sr = x.stop_rules;
-  drawerShell(nz(x.task), x.loop_id,
+  const task = nz(x.task);
+  drawerShell(task.length > 110 ? task.slice(0, 110) + "…" : task, x.loop_id,
+    task.length > 110 ? h("details", {}, h("summary", { class: "muted" }, "Full task"), h("div", { class: "log" }, task)) : null,
     h("dl", { class: "facts" }, h("dt", {}, "State"), h("dd", {}, nz(x.state)), h("dt", {}, "Check"), h("dd", { class: "mono" }, nz(x.check)),
       h("dt", {}, "Model"), h("dd", { class: "mono" }, nz(x.model, "default")), h("dt", {}, "Elapsed"), h("dd", {}, ago(x.elapsed_s))),
     h("section", {}, h("h2", {}, "Attempts"), h("div", { class: "timeline" }, x.attempts.map((a) =>
@@ -372,7 +409,7 @@ SCREENS.outcomes = { every: 60, async render(v) {
     if (m) side = h("div", { class: "stack", style: "gap:8px" }, h("h2", {}, `${lane} · ${model} · ${c}`),
       h("p", { class: "muted" }, `Done ${pct(m.done_pct)} (verified ${pct(m.verified_pct)}) · blocked ${pct(m.blocked_pct)} · n=${m.n}`),
       m.blocked_reasons.length ? h("ul", {}, m.blocked_reasons.map((r) => h("li", {}, `${r.reason} `, h("span", { class: "faint" }, `×${r.n}`)))) : h("p", { class: "faint" }, "No blocked runs."),
-      model !== "?" ? h("button", { class: "btn small", type: "button", onclick: () => copy(cmdline(["outsourcerer", "exclude", "add", model])) }, "Exclude this model (copy command)") : null);
+      model !== "?" ? h("div", { style: "display:flex;gap:6px" }, runBtn("Exclude this model", ["outsourcerer", "exclude", "add", model]), copyBtn(["outsourcerer", "exclude", "add", model])) : null);
   }
   put(v, h("div", { class: "head" }, h("div", {}, h("h1", {}, "Outcomes"), h("p", { class: "sub" }, "Did finished work get verified, or did the model just say done?"))),
     hero, h("div", { style: "height:16px" }),
@@ -515,7 +552,7 @@ SCREENS.lanes = { every: 120, async render(v) {
   const ex = failed(d.exclude) ? errBox("exclude", d.exclude) : h("section", { class: "card pad stack", style: "gap:8px" }, h("h2", {}, "Never use"),
     h("p", { class: "faint small" }, "Refused with -m and never auto-picked."),
     d.exclude.entries.length ? d.exclude.entries.map((e) => h("div", { style: "display:flex;gap:8px;align-items:center" }, h("span", { class: "mono grow" }, e.entry), h("span", { class: "faint small" }, e.source),
-      h("button", { class: "ghost small", type: "button", onclick: () => copy(cmdline(["outsourcerer", "exclude", "rm", e.entry])) }, "Copy: remove"))) : h("p", { class: "muted" }, "Nothing excluded."));
+      e.source === "saved" ? runBtn("Remove", ["outsourcerer", "exclude", "rm", e.entry], "ghost small") : h("span", { class: "faint small" }, "set by env"))) : h("p", { class: "muted" }, "Nothing excluded."));
   const caps = failed(d.limits) ? errBox("limits", d.limits) : h("section", { class: "card pad stack", style: "gap:8px" }, h("h2", {}, "Daily caps"),
     d.limits.caps.length ? d.limits.caps.map((c) => { const p = c.per_day ? Math.min(100, Math.round((100 * (c.used_today || 0)) / c.per_day)) : 0;
       return h("div", { class: "stack", style: "gap:4px" }, h("div", { style: "display:flex;justify-content:space-between" }, h("span", { class: "mono" }, `${c.lane} ${c.model}`), h("span", { class: "mono" }, `${c.used_today || 0} / ${c.per_day}`)),
@@ -532,20 +569,22 @@ SCREENS.settings = { every: 30, async render(v) {
   const modes = [["auto", "Auto-pilot"], ["hybrid", "Hybrid"], ["manual", "You-drive"]];
   put(v, h("h1", { style: "margin-bottom:16px" }, "Settings"),
     sec("Driving mode", "How much Outsourcerer delegates without asking.", failed(d.mode) ? errBox("mode", d.mode) : [h("p", {}, d.mode.meaning),
-      h("div", { style: "display:flex;gap:6px;flex-wrap:wrap" }, modes.map(([k, l]) => h("button", { class: k === d.mode.mode ? "pbtn small" : "btn small", type: "button",
-        onclick: () => copy(cmdline(["outsourcerer", "mode", k])) }, l + (k === d.mode.mode ? " (current)" : ""))))]),
+      h("div", { style: "display:flex;gap:6px;flex-wrap:wrap" }, modes.map(([k, l]) => k === d.mode.mode
+        ? h("button", { class: "pbtn small", type: "button", "aria-pressed": "true", disabled: true }, l + " (current)")
+        : runBtn(l, ["outsourcerer", "mode", k])))]),
     sec("Cloud consent", "Sending code to a cloud lane. The secret scan still runs on every delegation.", failed(d.consent) ? errBox("consent", d.consent)
-      : h("p", {}, h("span", { class: "dot-label" }, h("span", { class: "dot " + (d.consent.granted ? "green" : "gray") }), d.consent.granted ? `Granted ${nz(d.consent.granted_at, "")}` : "Not granted"))),
+      : h("div", { style: "display:flex;gap:10px;align-items:center;flex-wrap:wrap" }, h("span", { class: "dot-label" }, h("span", { class: "dot " + (d.consent.granted ? "green" : "gray") }), d.consent.granted ? `Granted ${nz(d.consent.granted_at, "")}` : "Not granted"),
+        d.consent.granted ? runBtn("Revoke", ["outsourcerer", "consent", "revoke"]) : runBtn("Grant", ["outsourcerer", "consent", "grant"]))),
     sec("Limits tap", "Reads live Claude limits from the statusline so Fuel is not a guess.", failed(d.tap) ? errBox("tap", d.tap)
       : h("p", {}, d.tap.installed ? `Installed · last reading ${ago(d.tap.reading_age_s)} ago` : "Not installed. ", d.tap.installed ? null :
-        h("button", { class: "btn small", type: "button", onclick: () => copy("outsourcerer tap install") }, "Copy: tap install"))),
+        runBtn("Install the tap", ["outsourcerer", "tap", "install"]))),
     sec("Supervision", "The heartbeat watches delegated runs while you are away.", failed(d.heartbeat) ? errBox("heartbeat", d.heartbeat)
       : h("p", {}, d.heartbeat.armed ? `Armed (pid ${d.heartbeat.pid})` : "Not armed. ", d.heartbeat.armed ? null :
-        h("button", { class: "btn small", type: "button", onclick: () => copy("outsourcerer heartbeat start") }, "Copy: heartbeat start"))),
+        runBtn("Arm the heartbeat", ["outsourcerer", "heartbeat", "start"]))),
     sec("This dashboard", "Local only. No telemetry.", h("dl", { class: "facts" },
       h("dt", {}, "Address"), h("dd", { class: "mono" }, location.host),
       h("dt", {}, "Token"), h("dd", { class: "mono" }, failed(d.doctor) ? "<state home>/dash/token" : `${d.doctor.state_home.path}/dash/token (0600)`),
-      h("dt", {}, "Actions"), h("dd", {}, "Read-only: buttons copy the exact command."),
+      h("dt", {}, "Actions"), h("dd", {}, "Buttons run one allow-listed command each (shown on hover); cancel and revoke ask twice."),
       h("dt", {}, "Version"), h("dd", { class: "mono" }, failed(d.doctor) ? "—" : d.doctor.version))));
 } };
 
