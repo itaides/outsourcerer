@@ -90,6 +90,7 @@ ENDPOINTS = {
     "land-queue": (_fixed("land", "queue", "--json"), 10, "json"),
     "loops":      (_fixed("loop", "status", "--json"), 5, "json"),
     "fanouts":    (_fixed("fanout", "list", "--json"), 10, "json"),
+    "models":     (_fixed("models", "--json"), 300, "json"),
     "fanout":     (_with_id("fanout", "status", after=("--json",)), 5, "json"),
     "loop":       (_with_id("loop", "status", after=("--json",)), 5, "json"),
     "job":        (_with_id("status", after=("--json",)), 3, "json"),
@@ -114,6 +115,7 @@ VALIDATORS = {
     "{lverb}":  lambda v: v in ("edit", "yolo"),
     "{num}":    lambda v: v.isdigit() and 1 <= int(v) <= 999,
     "{text}":   lambda v: 0 < len(v.strip()) and len(v) <= 4000 and "\x00" not in v and not v.lstrip().startswith("-"),
+    "{prov}":   lambda v: v in ("devin", "gemini"),   # lanes whose cached catalog lists models -m alone would route elsewhere
     "{check}":  lambda v: 0 < len(v.strip()) and len(v) <= 500 and "\x00" not in v and "\n" not in v,
 }
 ACTIONS = [
@@ -137,6 +139,8 @@ ACTIONS = [
     ["bg", "{verb}", "-m", "{model}", "{text}"],
     ["bg", "--worktree", "{verb}", "{text}"],
     ["bg", "--worktree", "{verb}", "-m", "{model}", "{text}"],
+    ["bg", "--provider", "{prov}", "{verb}", "-m", "{model}", "{text}"],
+    ["bg", "--worktree", "--provider", "{prov}", "{verb}", "-m", "{model}", "{text}"],
     ["loop", "verify", "--check", "{check}", "--verb", "{lverb}", "--max", "{num}", "--max-minutes", "{num}", "--", "{text}"],
     ["loop", "verify", "--check", "{check}", "--verb", "{lverb}", "--max", "{num}", "--max-minutes", "{num}", "--worktree", "--", "{text}"],
     ["loop", "verify", "-m", "{model}", "--check", "{check}", "--verb", "{lverb}", "--max", "{num}", "--max-minutes", "{num}", "--", "{text}"],

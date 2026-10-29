@@ -106,7 +106,8 @@ PY
 for argv in '["bg","edit","fix the flaky tests"]' '["bg","run","-m","gpt-5.6-sol","map the auth module"]' '["bg","--worktree","yolo","-m","z-ai/glm-5.2","refactor x"]' \
             '["loop","verify","--check","npm test","--verb","edit","--max","4","--max-minutes","20","--worktree","--","make it pass"]' \
             '["loop","verify","-m","sol","--check","npx playwright test --retries=0","--verb","yolo","--max","3","--max-minutes","15","--","x"]' \
-            '["session","reply","dec1a421-5e50-4c02-a675-595da44f531c","go on"]'; do
+            '["session","reply","dec1a421-5e50-4c02-a675-595da44f531c","go on"]' \
+            '["bg","--provider","devin","edit","-m","claude-5-fable-high","x"]' '["bg","--worktree","--provider","gemini","run","-m","gemini-4-argon-high","x"]'; do
   [ "$(allow "$argv")" = yes ] && ok "allowed: $argv" || bad "refused: $argv"
 done
 for argv in '["bg","--cloud-ack","edit","x"]' '["bg","edit","--yolo"]' '["bg","edit","-rf x"]' '["bg","sudo","x"]' '["bg","edit","-m","-x","t"]' '["bg","edit","t","extra"]' \
@@ -114,7 +115,9 @@ for argv in '["bg","--cloud-ack","edit","x"]' '["bg","edit","--yolo"]' '["bg","e
             '["loop","verify","--check","npm test","--verb","run","--max","4","--max-minutes","20","--","x"]' \
             '["loop","verify","--check","npm test","--verb","edit","--max","0","--max-minutes","20","--","x"]' \
             '["loop","verify","--check","npm test","--verb","edit","--max","4","--max-minutes","20","x"]' \
-            '["session","reply","../x","hi"]' '["session","send","s1","hi"]'; do
+            '["session","reply","../x","hi"]' '["session","send","s1","hi"]' \
+            '["bg","--provider","cc","edit","-m","opus","x"]' '["bg","--provider","devin","edit","x"]' \
+            '["loop","verify","--provider","devin","-m","x","--check","t","--verb","edit","--max","1","--max-minutes","1","--","x"]'; do
   [ "$(allow "$argv")" = no ] && ok "refused: $argv" || bad "allowed: $argv"
 done
 # a loop starts detached; an immediate refusal (here: an excluded model) is reported, not hidden

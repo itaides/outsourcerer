@@ -16,7 +16,8 @@
 #   task add|start|done|hold|...   Plan steps: deps, spec, check; workers get a brief with earlier results
 #   land <tid> [--pr|--dry-run]    Merge gate: verify, merge one at a time, re-check, never clobber
 #   flow ls|show|run NAME          Ready-made plans: council-build, spec-build, best-of-n
-#   models                         Print the LIVE list of selectable Devin models (+ plan-cost heuristic)
+#   models [--json]                Print the LIVE list of selectable Devin models (+ plan-cost heuristic);
+#                                  --json: every pickable model (alias table + cached catalogs), offline
 #   run     [-m MODEL] "<task>"    One-shot delegation (permission: auto / read-only auto-approve)
 #   explore [-m MODEL] "<task>"    Alias for run, read-only fan-out (NOTE: 'auto' blocks tool EXEC)
 #   research[-m MODEL] "<task>"    Delegation that must RUN tools (recall binary, scripts), uses
@@ -21480,7 +21481,42 @@ doctor() {
   return 0
 }
 
+# _models_json -> `models --json`: every model you can pick, offline (no network): the alias table
+# (built-ins + ~/.outsourcerer/models.local), where -m alone fixes the lane, plus the cached live
+# catalogs (Devin, Gemini), whose extra ids need --provider to land on that lane. One entry per
+# lane + model; `aliases` are the other names -m accepts for it; `excluded` is the never-use list.
+_models_json() {
+  _json_need_jq models
+  local rows l p f cats="[]" ex="[]" m
+  rows="$(printf '%s\n' "$OSRC_MODEL_TABLE" | awk -F'|' 'NF==4 && $1 != "" {print}')"
+  for l in dv gm; do
+    case "$l" in dv) p=devin ;; gm) p=gemini ;; esac
+    f="$(_catalog_path "$l" 2>/dev/null)" || continue
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    cats="$(jq -c --arg l "$l" --arg p "$p" --slurpfile c "$f" '. + [($c[0] // [])[] | select(type == "string" and length > 0) | {lane:$l, provider:$p, model:.}]' <<<"$cats" 2>/dev/null)" || cats="[]"
+  done
+  if _exclude_active 2>/dev/null; then
+    while IFS= read -r m; do
+      [ -n "$m" ] || continue
+      _exclude_hit "$m" && ex="$(jq -c --arg m "$m" '. + [$m]' <<<"$ex")"
+    done < <(printf '%s\n' "$rows" | awk -F'|' '{print $1; print $2}'; jq -r '.[].model' <<<"$cats")
+  fi
+  printf '%s\n' "$rows" | jq -Rnc --argjson cats "$cats" --argjson ex "$ex" '
+    [inputs | select(length > 0) | split("|") | {alias:.[0], model:.[1], lane:.[2], tier:.[3]}] as $t
+    | ($t | group_by([.lane, .model]) | map({
+        lane:.[0].lane, model:.[0].model, tier:.[0].tier, provider:null, source:"table",
+        pick:(if any(.[]; .alias == .model) then .[0].model else (map(.alias) | sort_by(length) | first) end),
+        aliases:(. as $g | $g | map(.alias) | map(select(. != $g[0].model)) | unique)})) as $tab
+    | ($tab | map(.lane + "|" + .model) + ($t | map(.lane + "|" + .alias))) as $known
+    | ($cats | map(select((.lane + "|" + .model) as $k | ($known | index($k)) | not))
+             | unique_by([.lane, .model])
+             | map(. + {tier:null, source:"catalog", pick:.model, aliases:[]})) as $cat
+    | ($tab + $cat) | map(. + {excluded:(((.aliases + [.model, .pick]) | map(. as $a | $ex | index($a)) | any))})
+    | {schema_version:"1", models:., lanes:(map(.lane) | unique)}'
+}
+
 models() {
+  if [ "${1:-}" = "--json" ]; then _models_json; return $?; fi
   if [ "${1:-}" = "--refresh" ]; then
     refresh_models
     echo

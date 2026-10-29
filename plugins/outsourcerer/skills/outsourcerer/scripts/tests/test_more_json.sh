@@ -89,6 +89,21 @@ txt="$(O land queue)"
 printf '%s\n' "$txt" | grep 'no check recorded: lands as unverified' >/dev/null && ok "land queue text names unverified lands" || bad "land queue text: $txt"
 ( O land queue --bogus >/dev/null 2>&1 ) && bad "land queue must refuse unknown options" || ok "land queue refuses unknown options"
 
+# --- models --json: the alias table + models.local + cached catalogs, offline ------------------------------
+mkdir -p "$OSRC_HOME/catalogs"
+printf '["glm-5.2","claude-5-fable-high","claude-5-fable-high"]\n' > "$OSRC_HOME/catalogs/dv.json"
+printf 'mymodel|mymodel|dv|capable\n' > "$OSRC_HOME/models.local"
+O exclude add opus >/dev/null 2>&1
+out="$(O models --json)"
+check "models: Codex sol with its alias, not itself" "$out" '(.models[] | select(.lane=="cx" and .model=="gpt-5.6-sol")) | .aliases == ["sol"] and .source == "table" and .provider == null and .tier == "frontier"'
+check "models: a catalog-only id needs --provider" "$out" '[.models[] | select(.model=="claude-5-fable-high")] | length == 1 and .[0].lane == "dv" and .[0].provider == "devin" and .[0].source == "catalog"'
+check "models: a catalog id the table already has is not repeated" "$out" '[.models[] | select(.lane=="dv" and .model=="glm-5.2")] | length == 1 and .[0].source == "table"'
+check "models: models.local rows are included" "$out" 'any(.models[]; .model == "mymodel" and .lane == "dv")'
+check "models: the never-use list marks a model excluded" "$out" '(.models[] | select(.lane=="cc" and .model=="opus")) .excluded == true and ((.models[] | select(.model=="gpt-5.6-sol")) .excluded == false)'
+check "models: one entry per lane + model" "$out" '(.models | map(.lane + "|" + .model) | length) == (.models | map(.lane + "|" + .model) | unique | length)'
+O exclude rm opus >/dev/null 2>&1; rm -f "$OSRC_HOME/models.local"
+O models 2>/dev/null | head -1 | grep -q . && ok "models text output still prints" || ok "models text output needs devin (skipped here)"
+
 # --- doctor --json (lane probes stubbed) ---------------------------------------------------------------------
 DLIB="$TMP/doctor.sh"
 cat > "$DLIB" <<EOF

@@ -159,6 +159,20 @@ tr.sel td { background: var(--s2); }
 .node.running { border-color: var(--ac); }
 .badge2 { font-size: 10.5px; padding: 0 6px; border-radius: 4px; border: 1px solid var(--bd2); color: var(--mu); }
 
+/* model picker (New delegation) */
+.mp { position: relative; width: min(460px, calc(100vw - 64px)); }
+.mp-list { min-width: min(460px, calc(100vw - 48px)); }
+.mp input { width: 100%; }
+.mp-list { position: absolute; z-index: 15; top: calc(100% + 4px); left: 0; right: 0; max-height: 360px; overflow-y: auto; background: var(--s1);
+  border: 1px solid var(--bd2); border-radius: 8px; box-shadow: 0 16px 40px rgba(0,0,0,.45); padding: 4px; }
+.mp-group { padding: 8px 10px 3px; color: var(--fa); font-size: 11.5px; display: flex; gap: 8px; align-items: center; }
+.mp-opt { display: flex; gap: 10px; align-items: baseline; padding: 6px 10px; border-radius: 6px; cursor: pointer; }
+.mp-opt[aria-selected="true"] { background: var(--s3); }
+.mp-opt[aria-disabled="true"] { opacity: .45; cursor: not-allowed; }
+.mp-opt .pk { font-weight: 500; }
+.mp-opt .id { color: var(--fa); font-family: var(--mono); font-size: 11.5px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mp-opt .why { color: var(--am); font-size: 11.5px; white-space: nowrap; }
+
 /* command palette (⌘K) */
 kbd { font-family: var(--mono); font-size: 10.5px; padding: 0 5px; border: 1px solid var(--bd2); border-radius: 4px; color: var(--mu); background: var(--s2); }
 .kbd-hint { display: inline-flex; gap: 8px; align-items: center; border: 1px solid var(--bd) !important; color: var(--fa); }

@@ -553,7 +553,82 @@ function dag(ps) {
 // ---- 6 · New delegation --------------------------------------------------------------------------------------------
 // One-shot and Loop launch from here (allow-listed `bg` / `loop verify` shapes); fanout, crew and second opinion stay
 // copy-a-command for now. advise + estimate recommend a lane before you launch.
-let delTask = "", delShape = "bg", delVerb = "edit", delModel = "", delWt = true, delCheck = "", delMax = "4", delMin = "20", delOut = null;
+let delTask = "", delShape = "bg", delVerb = "edit", delModel = "", delProv = null, delModelLabel = "", delWt = true, delCheck = "", delMax = "4", delMin = "20", delOut = null;
+const LANE_NAMES = { cx: "Codex · your ChatGPT plan", cc: "Claude · your Claude plan", or: "OpenRouter · cash credit", dv: "Devin", gm: "Gemini", local: "Local" };
+// The model picker: every model `models --json` knows, grouped by lane, readiness from doctor. Table models route by
+// -m alone; catalog-only ids need --provider (one-shot only: loop verify has no --provider). Typing searches the
+// catalogs too, and any typed name can be used as is (engine lanes pass -m through to their own catalog).
+function modelPicker(models, lanes, onPick) {
+  const ready = {}; (lanes || []).forEach((l) => { ready[l.lane] = l; });
+  const usable = (m) => {
+    if (m.excluded) return "on your never-use list";
+    const l = ready[m.lane];
+    if (l && l.down) return "lane down";
+    if (l && !l.ready) return "lane not ready";
+    if (m.provider && delShape === "loop") return "one-shot only";
+    return "";
+  };
+  const wrap = h("div", { class: "mp" });
+  const input = h("input", { type: "text", role: "combobox", "aria-expanded": "false", "aria-autocomplete": "list", "aria-label": "Model",
+    placeholder: "Auto (let routing pick)", autocomplete: "off", spellcheck: "false" });
+  input.value = delModelLabel;
+  const list = h("div", { class: "mp-list", role: "listbox", hidden: true });
+  let opts = [], sel = 0;
+  const choose = (o) => { if (!o || o.why) return; onPick(o); list.hidden = true; input.setAttribute("aria-expanded", "false"); };
+  function build() {
+    const q = input.value.trim().toLowerCase();
+    const words = q.split(/\s+/).filter(Boolean);   // every word must appear somewhere: "fable high" finds claude-fable-5-1-high
+    const match = (m) => { const hay = [m.pick, m.model, ...(m.aliases || []), LANE_NAMES[m.lane] || m.lane, m.tier || ""].join(" ").toLowerCase();
+      return words.every((w) => hay.includes(w)); };
+    opts = []; const nodes = [];
+    const push = (o, group) => { o.i = opts.length; opts.push(o);
+      nodes.push(h("div", { class: "mp-opt", role: "option", id: "mp-" + o.i, "aria-selected": String(o.i === sel), "aria-disabled": String(!!o.why),
+        onmousedown: (e) => { e.preventDefault(); choose(o); }, onmousemove: () => { if (sel !== o.i) { sel = o.i; paint(); } } },
+        h("span", { class: "pk" }, o.label), h("span", { class: "id" }, o.sub || ""), o.why ? h("span", { class: "why" }, o.why) : null)); };
+    push({ label: "Auto", sub: "let routing pick (advise + conserve rules)", model: "", provider: null, display: "" });
+    const byLane = {};
+    (models || []).filter((m) => !["gi", "ci"].includes(m.lane) && (m.source === "table" ? match(m) : (q.length >= 2 && match(m))))
+      .forEach((m) => { (byLane[m.lane] = byLane[m.lane] || []).push(m); });
+    Object.keys(byLane).sort((a, b) => (LANE_NAMES[a] ? 0 : 1) - (LANE_NAMES[b] ? 0 : 1) || a.localeCompare(b)).forEach((lane) => {
+      const l = ready[lane];
+      nodes.push(h("div", { class: "mp-group", role: "presentation" }, LANE_NAMES[lane] || lane,
+        l ? h("span", { class: "dot-label" }, h("span", { class: "dot " + (l.down ? "red" : l.ready ? "green" : "amber") }), l.down ? "down" : l.ready ? "ready" : "not ready") : null));
+      const TIER = { frontier: 0, capable: 1, mid: 2, budget: 3 };
+      const rows = byLane[lane].sort((a, b) => (a.source === "table" ? 0 : 1) - (b.source === "table" ? 0 : 1)
+        || (TIER[a.tier] ?? 9) - (TIER[b.tier] ?? 9) || a.pick.length - b.pick.length || a.pick.localeCompare(b.pick));
+      rows.slice(0, q ? 40 : 20).forEach((m) => push({ label: m.pick, model: m.pick, provider: m.provider, why: usable(m),
+        sub: [m.model !== m.pick ? m.model : "", m.tier, m.source === "catalog" ? "catalog" : "", (m.aliases || []).length ? "also: " + m.aliases.join(", ") : ""].filter(Boolean).join(" · "),
+        display: `${m.pick} · ${LANE_NAMES[lane] || lane}` }));
+    });
+    if (q && !opts.some((o) => o.model.toLowerCase() === q))
+      push({ label: `Use “${input.value.trim()}” as typed`, sub: "passed to -m as is (engine lanes take their own model names)", model: input.value.trim(), provider: null,
+        display: input.value.trim(), why: /^-|\s/.test(input.value.trim()) ? "not a model name" : "" });
+    if (sel >= opts.length) sel = 0;
+    put(list, nodes);
+  }
+  function paint() { list.querySelectorAll(".mp-opt").forEach((n, i) => n.setAttribute("aria-selected", String(i === sel)));
+    const el = $("mp-" + sel); if (el) { el.scrollIntoView({ block: "nearest" }); input.setAttribute("aria-activedescendant", "mp-" + sel); } }
+  const open = () => { list.hidden = false; input.setAttribute("aria-expanded", "true"); build(); paint(); };
+  input.addEventListener("focus", () => { input.select(); open(); });
+  input.addEventListener("input", () => { sel = 0; open(); });
+  input.addEventListener("blur", () => { setTimeout(() => { list.hidden = true; input.value = delModelLabel; input.setAttribute("aria-expanded", "false"); }, 120); });
+  input.addEventListener("keydown", (e) => {
+    if (list.hidden) return;
+    if (e.key === "ArrowDown") { e.preventDefault(); sel = Math.min(opts.length - 1, sel + 1); paint(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); sel = Math.max(0, sel - 1); paint(); }
+    else if (e.key === "Enter") { e.preventDefault(); choose(opts[sel]); }
+    else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); list.hidden = true; input.blur(); }
+  });
+  wrap.append(input, list);
+  return wrap;
+}
+// A model name from advise -> the picker entry it matches (so a catalog model also gets its --provider).
+function useModel(name) {
+  const ms = (cache.models && cache.models.models) || [];
+  const m = ms.find((x) => x.pick === name || x.model === name || (x.aliases || []).includes(name));
+  delModel = m ? m.pick : name; delProv = m ? m.provider : null;
+  delModelLabel = m ? `${m.pick} · ${LANE_NAMES[m.lane] || m.lane}` : name;
+}
 function delArgv() {
   const t = delTask.trim(), m = delModel.trim();
   if (delShape === "loop") {
@@ -564,7 +639,7 @@ function delArgv() {
   if (delShape === "fanout") return ["outsourcerer", "fanout", "--verb", delVerb, "--", t || "<task>"];
   if (delShape === "crew") return ["outsourcerer", "crew", "--check", delCheck.trim() || "<check command>", "--", t || "<task>", t || "<task>", t || "<task>"];
   if (delShape === "second") return ["outsourcerer", "second-opinion", t || "<task>"];
-  return ["outsourcerer", "bg", ...(delWt ? ["--worktree"] : []), delVerb, ...(m ? ["-m", m] : []), t || "<task>"];
+  return ["outsourcerer", "bg", ...(delWt ? ["--worktree"] : []), ...(m && delProv ? ["--provider", delProv] : []), delVerb, ...(m ? ["-m", m] : []), t || "<task>"];
 }
 SCREENS.delegate = { every: 3600, async render(v) {
   const shapes = { bg: "One-shot", loop: "Loop (until a check passes)", fanout: "Fanout", crew: "Crew (N writers, keep best)", second: "Second opinion" };
@@ -580,7 +655,12 @@ SCREENS.delegate = { every: 3600, async render(v) {
   }
   const field = (label, el) => h("label", { class: "stack", style: "gap:4px" }, h("span", { class: "muted small" }, label), el);
   const ta = h("textarea", { "aria-label": "Task", placeholder: "Describe the task…", oninput: (e) => { delTask = e.target.value; sync(); } }); ta.value = delTask;
-  const model = h("input", { type: "text", placeholder: "default (let routing pick)", "aria-label": "Model", oninput: (e) => { delModel = e.target.value; sync(); } }); model.value = delModel;
+  const md = await many(["models", "doctor"]);
+  const model = failed(md.models)
+    ? h("input", { type: "text", placeholder: "default (let routing pick)", "aria-label": "Model", oninput: (e) => { delModel = e.target.value; delProv = null; delModelLabel = delModel; sync(); } })
+    : modelPicker(md.models.models, failed(md.doctor) ? [] : md.doctor.lanes, (o) => {
+        delModel = o.model; delProv = o.provider || null; delModelLabel = o.display; rerender(); });
+  if (model.tagName === "INPUT") model.value = delModel;
   const wt = h("input", { type: "checkbox", "aria-label": "Run in its own git worktree", onchange: (e) => { delWt = e.target.checked; sync(); } }); wt.checked = delWt;
   const check = h("input", { type: "text", placeholder: "e.g. npm test", "aria-label": "Check command", style: "width:100%", oninput: (e) => { delCheck = e.target.value; sync(); } }); check.value = delCheck;
   const mx = h("input", { type: "text", size: 3, "aria-label": "Max attempts", oninput: (e) => { delMax = e.target.value.replace(/\D/g, ""); sync(); } }); mx.value = delMax;
@@ -603,10 +683,10 @@ SCREENS.delegate = { every: 3600, async render(v) {
       failed(a) ? errBox("advise", a) : h("section", { class: "card pad stack", style: "gap:6px" }, h("h2", {}, "Recommendation"),
         h("p", {}, h("span", { class: "mono" }, `${nz(a.recommendation.lane)} · ${nz(a.recommendation.model)}`), h("span", { class: "muted" }, `  ${a.category} · ${a.difficulty} · effort ${a.effort}`)),
         h("p", { class: "muted small" }, nz(a.recommendation.reason, "")), a.conservation ? h("p", { class: "amber small" }, a.conservation) : null,
-        a.recommendation.model ? h("button", { class: "btn small", type: "button", onclick: () => { delModel = a.recommendation.model; rerender(); } }, `Use ${a.recommendation.model}`) : null,
+        a.recommendation.model ? h("button", { class: "btn small", type: "button", onclick: () => { useModel(a.recommendation.model); rerender(); } }, `Use ${a.recommendation.model}`) : null,
         h("div", { class: "tbl" }, h("table", { style: "min-width:0" }, h("thead", {}, h("tr", {}, ["Lane", "Model", "Score", "Meets bar", ""].map((c) => h("th", {}, c)))),
           h("tbody", {}, (a.shortlist || []).slice(0, 8).map((s) => h("tr", {}, h("td", {}, s.lane), h("td", { class: "mono" }, s.model), h("td", { class: "mono" }, nz(s.score)), h("td", {}, s.meets ? "yes" : "no"),
-            h("td", {}, h("button", { class: "ghost small", type: "button", onclick: () => { delModel = s.model; rerender(); } }, "Use")))))))),
+            h("td", {}, h("button", { class: "ghost small", type: "button", onclick: () => { useModel(s.model); rerender(); } }, "Use")))))))),
       failed(e) ? errBox("estimate", e) : h("section", { class: "card pad stack", style: "gap:6px" }, h("h2", {}, "Cost"),
         h("p", { class: "muted" }, `${e.prompt_tokens} prompt tokens · opus would cost ≈ $${Number(e.counterfactual_opus_usd).toFixed(2)}`),
         (e.plan_lanes || []).map((p) => h("div", { class: "small" }, h("span", { class: "mono" }, p.lane), `  ${p.label}: ${p.cost}`)),
@@ -615,7 +695,7 @@ SCREENS.delegate = { every: 3600, async render(v) {
   put(v, h("div", { class: "head" }, h("div", {}, h("h1", {}, "New delegation"),
       h("p", { class: "sub" }, "Describe the work, pick how it runs, and launch it. It shows up in Live."))),
     h("div", { class: "cols" }, h("div", { class: "wide stack" }, ta,
-      field("Shape", seg(shapes, delShape, (k) => { delShape = k; })),
+      field("Shape", seg(shapes, delShape, (k) => { delShape = k; if (k === "loop" && delProv) { delModel = ""; delProv = null; delModelLabel = ""; toast("That catalog model is one-shot only; the model is back to Auto"); } })),
       field("Access", seg(verbs, delVerb, (k) => { delVerb = k; })),
       h("div", { style: "display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end" },
         field("Model", model),
