@@ -415,6 +415,17 @@ _posture_set() {  # <lane> <key> <value>  (atomic, private, symlink-safe)
     && mv -f "$tmp" "$f" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 1; }
 }
 cmd_posture() {
+  if { [ "${1:-}" = "status" ] && [ "${2:-}" = "--json" ]; } || [ "${1:-}" = "--json" ]; then
+    _json_need_jq posture
+    # One entry per remembered posture file <lane>.<key> (e.g. dv.yolo = refused, cx.down = <epoch>).
+    local f b items="[]"
+    for f in "$OSRC_POSTURE_DIR"/*.*; do
+      [ -f "$f" ] && [ ! -L "$f" ] || continue
+      b="$(basename "$f")"
+      items="$(jq -c --arg l "${b%%.*}" --arg k "${b#*.}" --arg v "$(head -c 200 "$f" 2>/dev/null)" '. + [{lane:$l, key:$k, value:$v}]' <<<"$items")" || return 1
+    done
+    jq -cn --argjson p "$items" '{schema_version:"1", postures:$p}'; return 0
+  fi
   case "${1:-status}" in
     status) if [ -d "$OSRC_POSTURE_DIR" ] && ls "$OSRC_POSTURE_DIR"/*.* >/dev/null 2>&1; then
               echo "remembered lane postures:"
@@ -10244,6 +10255,7 @@ _portable_mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/nu
 cmd_tap() {
   local settings="${OSRC_CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
   local stash="$OSRC_HOME/tap-original-statusline.json"
+  [ "${1:-}" = "--json" ] && set -- status --json
   case "${1:-}" in
     run)
       local input; input="$(cat 2>/dev/null)"
@@ -10301,6 +10313,18 @@ cmd_tap() {
       rm -f "$stash" "$OSRC_HOME/tap-original-statusline" "$OSRC_HOME/rate-limits.json" 2>/dev/null   # drop the frozen capture so it can't shadow a fresh source
       echo "tap: uninstalled (original statusline restored, captured limits cleared)." ;;
     status|"")
+      if [ "${2:-}" = "--json" ]; then
+        _json_need_jq tap
+        local inst=false rl="null"
+        [ -f "$settings" ] && jq -re '.statusLine.command // ""' "$settings" 2>/dev/null | grep -q "tap run" && inst=true
+        [ -f "$OSRC_HOME/rate-limits.json" ] && [ ! -L "$OSRC_HOME/rate-limits.json" ] && rl="$(jq -c . "$OSRC_HOME/rate-limits.json" 2>/dev/null)"
+        [ -n "$rl" ] || rl="null"
+        jq -cn --argjson inst "$inst" --argjson rl "$rl" --argjson now "$(date +%s)" '
+          {schema_version:"1", installed:$inst, capturing:($rl != null),
+           reading_age_s:(if ($rl.timestamp // null) == null then null else ($now - ($rl.timestamp / 1000 | floor)) end),
+           five_hour:($rl.five_hour // null), seven_day:($rl.seven_day // null)}'
+        return 0
+      fi
       if [ -f "$OSRC_HOME/rate-limits.json" ]; then echo "tap: capturing — $(cat "$OSRC_HOME/rate-limits.json" 2>/dev/null | head -c 200)"
       else echo "tap: not capturing yet. Install with: $0 tap install (one-time; makes limit-awareness automatic without token-optimizer)"; fi ;;
     *) die "tap: unknown action '${1:-}' (use: install|uninstall|status; 'run' is the internal statusline handler)" ;;
@@ -20756,7 +20780,55 @@ EOF
   echo "  (host-locked claude.ai / chrome connectors are not in ~/.claude.json and are skipped automatically)"
 }
 
+# _doctor_json -> `doctor --json`: one entry per registered lane, from the lane descriptors plus the
+# same cheap readiness probes `brief` runs (no paid pings, unlike OSRC_DOCTOR_PING). installed is
+# null for a lane with no CLI of its own (it rides another lane's transport). ready is the probe's
+# verdict; detail is what it reported. down carries an unexpired lane-down mark and its reason.
+_doctor_json() {
+  _json_need_jq doctor
+  local l cli c inst ready detail rp down dreason items="[]" postures f b writable=false
+  ( _mkdir_private "$OSRC_HOME" && : > "$OSRC_HOME/.doctor-w.$$" && rm -f "$OSRC_HOME/.doctor-w.$$" ) 2>/dev/null && writable=true
+  for l in $OSRC_LANE_REGISTRY; do
+    cli="$(_lane_field "$l" cli 2>/dev/null)"; inst=null
+    [ "$l" = dv ] && cli=devin   # dv dispatches through its own CLI but declares no cli= field
+    if [ -n "$cli" ]; then inst=false; for c in $cli; do have "$c" && { inst=true; break; }; done; fi
+    ready=false; detail=""
+    if [ "$l" = dv ]; then
+      local _au=""
+      if have devin && _au="$(_timeout "${OSRC_BRIEF_TIMEOUT:-5}" devin auth status 2>/dev/null)" && grep -qi "Logged in" <<<"$_au"; then
+        ready=true; detail="logged in"
+      fi
+    elif rp="$(_lane_ready_probe "$l" 2>/dev/null)" && [ -n "$rp" ]; then
+      ready=true; detail="${rp#*=}"
+    fi
+    down=false; dreason=""
+    if _lane_down_active "$l" 2>/dev/null; then down=true; dreason="$(_lane_down_reason "$l" 2>/dev/null)"; fi
+    postures="[]"
+    for f in "$OSRC_POSTURE_DIR/$l".*; do
+      [ -f "$f" ] && [ ! -L "$f" ] || continue
+      b="$(basename "$f")"
+      postures="$(jq -c --arg k "${b#*.}" --arg v "$(head -c 200 "$f" 2>/dev/null)" '. + [{key:$k, value:$v}]' <<<"$postures")" || return 1
+    done
+    items="$(jq -c --arg l "$l" --arg cli "$cli" --argjson inst "$inst" --argjson ready "$ready" --arg detail "$detail" \
+      --argjson down "$down" --arg dr "$dreason" --argjson postures "$postures" \
+      --arg cc "$(_lane_field "$l" cost_class 2>/dev/null)" --arg cd "$(_lane_field "$l" cost_disclosure 2>/dev/null)" \
+      --arg cloud "$(_lane_field "$l" is_cloud 2>/dev/null)" --arg pl "$(_lane_field "$l" plan_limited 2>/dev/null)" \
+      --arg cmp "$(_lane_field "$l" compare_class 2>/dev/null)" '
+      def nz: if . == "" then null else . end;
+      . + [{lane:$l, cli:($cli | nz | if . == null then [] else split(" ") end), installed:$inst,
+            ready:$ready, detail:($detail | nz), down:$down, down_reason:($dr | nz), postures:$postures,
+            cost_class:($cc | nz), cost_disclosure:($cd | nz), is_cloud:($cloud == "yes"),
+            plan_limited:($pl == "yes"), compare_class:($cmp | nz)}]' <<<"$items")" || return 1
+  done
+  jq -cn --arg v "$OSRC_VERSION" --arg plat "$OSRC_PLATFORM" --arg home "$OSRC_HOME" --argjson w "$writable" \
+    --argjson jq true --argjson lanes "$items" '
+    {schema_version:"1", version:$v, platform:$plat, state_home:{path:$home, writable:$w},
+     lanes:$lanes, summary:{lanes:($lanes | length), ready:($lanes | map(select(.ready)) | length),
+                            down:($lanes | map(select(.down)) | length)}}'
+}
+
 doctor() {
+  case " $* " in *" --json "*) _doctor_json; return $? ;; esac
   # doctor --fix: don't just diagnose the parity mirror — repair dead skill links in place (same
   # in-place re-pin `brief` runs). Everything else stays read-only diagnosis.
   local _dfix=0 _dstrict=0 _a
