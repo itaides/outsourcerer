@@ -6743,15 +6743,23 @@ _external_session_observations() { # <managed-job-items-json>
     done < <(tmux list-panes -a -F '#S:#I.#P\t#{pane_pid}\t#{pane_current_command}' 2>/dev/null)
   fi
   # A process-table sighting is intentionally not an endpoint and therefore cannot be claimed.
-  while IFS= read -r line; do
-    pid="${line%% *}"; command="${line#* }"
-    case "$command" in *codex*|*claude*)
-      start="$(_pid_start_identity "$pid" 2>/dev/null)" || start=""
-      id="proc.$pid"
-      items="$(_external_session_observation "$items" "$id" process "" "$pid" "$start")" || return 1
-      ;;
+  # Agent CLI processes: the EXECUTABLE must be `claude` or `codex` (or `node` running Claude Code or
+  # Codex). Matching "claude"/"codex" anywhere in the command line also caught every desktop-app helper
+  # (Claude Helper, ChatGPT's Codex helpers), shells whose snapshot path mentions .claude, and other
+  # tools' Python processes: on one machine 35 of 39 "external sessions" were such processes, each
+  # costing a ps and two jq calls, and they filled the inbox's can't-tell list.
+  local name args
+  while read -r pid name; do
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    case "$name" in
+      claude|codex) ;;
+      node) args="$(ps -o args= -p "$pid" 2>/dev/null)"; case "$args" in *claude-code*|*@openai/codex*) ;; *) continue ;; esac ;;
+      *) continue ;;
     esac
-  done < <(ps -axo pid=,command= 2>/dev/null)
+    start="$(_pid_start_identity "$pid" 2>/dev/null)" || start=""
+    id="proc.$pid"
+    items="$(_external_session_observation "$items" "$id" process "" "$pid" "$start")" || return 1
+  done < <(ps -axo pid=,ucomm= 2>/dev/null)
   printf '%s' "$items"
 }
 
@@ -7361,14 +7369,21 @@ _fleet_cc_peer_observations() {
   fresh_ms=$(( fresh_min * 60 * 1000 ))
   while IFS= read -r path; do
     [ -f "$path" ] && [ ! -L "$path" ] || continue
-    raw="$(jq -c . "$path" 2>/dev/null)" || continue
-    pid="$(printf '%s' "$raw" | jq -r '.pid // empty')"
-    session_id="$(printf '%s' "$raw" | jq -r '.sessionId // empty')"
+    # Every field this loop reads, from ONE jq call per session file (was ~15: one per field). Same
+    # defaults as the per-field reads; fields are joined by \x1f and the record ends in NUL, so a value
+    # holding a newline survives the read.
+    local _f=()
+    IFS=$'\x1f' read -r -d '' -a _f < <(jq -j '[(.pid // ""), (.sessionId // ""), (.updatedAt // 0), (.procStart // ""),
+        (.cwd // ""), (.startedAt // 0), (.version // ""), (.kind // "interactive"), (.name // "(unnamed)"),
+        (.jobId // ""), (.status // "unknown"), (.statusUpdatedAt // .updatedAt // 0), (.messagingSocketPath // ""),
+        (.waitingFor // "")] | map(tostring | gsub("\u001f"; " ")) | join("\u001f"), "\u0000"' "$path" 2>/dev/null) || continue
+    [ "${#_f[@]}" -ge 1 ] || continue
+    pid="${_f[0]:-}"; session_id="${_f[1]:-}"
     case "$pid" in ''|*[!0-9]*) continue ;; esac
     _external_session_id_valid "$session_id" || continue
-    updated="$(printf '%s' "$raw" | jq -r '.updatedAt // 0')"
+    updated="${_f[2]:-0}"
     case "$updated" in ''|*[!0-9]*) updated=0 ;; esac
-    proc_start="$(printf '%s' "$raw" | jq -r '.procStart // ""')"
+    proc_start="${_f[3]:-}"
     alive=0
     fresh=0
     liveness_evidence="PID $pid is not live"
@@ -7383,22 +7398,22 @@ _fleet_cc_peer_observations() {
     fi
     [ "$updated" -gt 0 ] && [ $(( now_ms - updated )) -le "$fresh_ms" ] 2>/dev/null && fresh=1
     [ "$alive" = 1 ] || [ "$fresh" = 1 ] || continue
-    cwd="$(printf '%s' "$raw" | jq -r '.cwd // ""')"
-    started="$(printf '%s' "$raw" | jq -r '.startedAt // 0')"
-    version="$(printf '%s' "$raw" | jq -r '.version // ""')"
-    kind="$(printf '%s' "$raw" | jq -r '.kind // "interactive"')"
-    name="$(printf '%s' "$raw" | jq -r '.name // "(unnamed)"')"; [ -n "$name" ] || name="(unnamed)"
+    cwd="${_f[4]:-}"
+    started="${_f[5]:-0}"
+    version="${_f[6]:-}"
+    kind="${_f[7]:-interactive}"
+    name="${_f[8]:-}"; [ -n "$name" ] || name="(unnamed)"
     transcript_mtime="$(_fleet_transcript_mtime "$session_id" "$cwd")"
     cached_name="$(_fleet_name_cache_get "$session_id" "$transcript_mtime")" || cached_name=""
     if [ -n "$cached_name" ]; then display_name="$cached_name"
     elif [ "$name" = "(unnamed)" ]; then display_name="$name"
     else display_name="$name (unnamed)"; fi
-    job_id="$(printf '%s' "$raw" | jq -r '.jobId // ""')"
-    status="$(printf '%s' "$raw" | jq -r '.status // "unknown"')"
-    status_updated="$(printf '%s' "$raw" | jq -r '.statusUpdatedAt // .updatedAt // 0')"
+    job_id="${_f[9]:-}"
+    status="${_f[10]:-unknown}"
+    status_updated="${_f[11]:-0}"
     case "$status_updated" in ''|*[!0-9]*) status_updated=0 ;; esac
-    socket="$(printf '%s' "$raw" | jq -r '.messagingSocketPath // ""')"
-    waiting_for="$(printf '%s' "$raw" | jq -r '.waitingFor // ""')"
+    socket="${_f[12]:-}"
+    waiting_for="${_f[13]:-}"
     if [ -z "$waiting_for" ] && [ "$alive" = 1 ] && _fleet_transcript_waiting "$session_id" "$cwd"; then
       waiting_for="transcript permission prompt"
     fi
@@ -7543,12 +7558,14 @@ _fleet_managed_pane_for_peer() { # <managed-items-json> <peer-pid> <peer-cwd>
 
 _fleet_snapshot_collect() {
   have jq || return 1
-  local items='[]' cc_items='[]' reconciled='[]' d job jstatus state item peer peer_pid peer_cwd pane_pid now snapshot canonical generation stall="${OSRC_STALL_SECS:-600}" _jpid _jspid _alive _p _sf _mrc
+  local items='[]' cc_items='[]' reconciled='[]' d job jstatus state item peer jobrows="" peer_pid peer_cwd pane_pid now snapshot canonical generation stall="${OSRC_STALL_SECS:-600}" _jpid _jspid _alive _p _sf _mrc
   case "$stall" in ''|*[!0-9]*|0) stall=600 ;; esac
   if [ -d "$OSRC_JOBS" ]; then
     while IFS= read -r d; do
       job="$(OSRC_RECONCILE_READ_ONLY=1 _job_json "$(basename "$d")" 2>/dev/null)" || continue
-      jstatus="$(printf '%s' "$job" | jq -r '.status // "unknown"')"
+      # One jq per job: its status (for the liveness logic below) and its compact form (for the single
+      # item-building pass after the loop). tojson keeps the compact JSON on one line.
+      { IFS= read -r jstatus; IFS= read -r job; } < <(printf '%s' "$job" | jq -r '(.status // "unknown"), tojson')
       jstatus="${jstatus#"${jstatus%%[![:space:]]*}"}"; jstatus="${jstatus%"${jstatus##*[![:space:]]}"}"
       state="$(_fleet_classify "$jstatus")"
       if [ "$state" = "blocked" ]; then
@@ -7592,15 +7609,20 @@ _fleet_snapshot_collect() {
           fi
         fi
       fi
-      item="$(printf '%s' "$job" | jq --arg fleet_state "$state" '
-        {schema_version:"1",session_id:null,owner:"managed",harness:"job",lane:.provider,
-         requested_model:.model,observed_model:.model,effort:.effort,endpoint:null,
-         harness_pid:null,pid_start:null,started_at:.started,state:$fleet_state,
-         state_evidence:(.status // "unknown"),composer_state:"unknown",claim:null,
-         task_summary:(.label // .verb),last_receipt:null,source_generation:(.job_id // null),
-         job_id:.job_id}')" || return 1
-      items="$(jq -cn --argjson items "$items" --argjson item "$item" '$items + [$item]')" || return 1
+      [ -n "$job" ] || continue
+      jobrows="$jobrows$state"$'\x1f'"$job"$'\n'
     done < <(find "$OSRC_JOBS" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null)
+    # Every job item in one pass (was two jq calls per job, the second re-copying the whole list).
+    if [ -n "$jobrows" ]; then
+      items="$(printf '%s' "$jobrows" | jq -Rnc --argjson items "$items" '$items + [inputs | select(length > 0)
+        | (index("\u001f")) as $i | .[:$i] as $fleet_state | (.[$i+1:] | fromjson)
+        | {schema_version:"1",session_id:null,owner:"managed",harness:"job",lane:.provider,
+           requested_model:.model,observed_model:.model,effort:.effort,endpoint:null,
+           harness_pid:null,pid_start:null,started_at:.started,state:$fleet_state,
+           state_evidence:(.status // "unknown"),composer_state:"unknown",claim:null,
+           task_summary:(.label // .verb),last_receipt:null,source_generation:(.job_id // null),
+           job_id:.job_id}]')" || return 1
+    fi
   fi
   items="$(_external_session_observations "$items")" || return 1
   cc_items="$(_fleet_cc_peer_observations)" || return 1
@@ -9773,6 +9795,13 @@ _est_tokens() { local n=${#1}; echo $(( n * 10 / 33 )); }
 # every later numeric comparison. GNU's `-c` is simply invalid on BSD and exits non-zero, so trying
 # GNU FIRST is the only ordering where the fallback actually happens on both.
 _mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || printf ''; }
+# _size_mtime <file> -> "size:mtime" from one stat call; empty when unreadable. BSD stat on macOS (where
+# `stat -c` is an error, costing a fork), GNU elsewhere. Never BSD-first on GNU: there `stat -f` means
+# "filesystem status" and could print the wrong thing without failing.
+_size_mtime() {
+  if [ "${OSRC_PLATFORM:-}" = mac ]; then stat -f '%z:%m' "$1" 2>/dev/null || printf ''
+  else stat -c '%s:%Y' "$1" 2>/dev/null || stat -f '%z:%m' "$1" 2>/dev/null || printf ''; fi
+}
 
 # _codex_rate_limits -> "5h%|wk%|5h_reset_epoch|wk_reset_epoch" from the newest Codex session
 # rollout. Codex records the ChatGPT-plan rate-limit windows the API returns into every rollout, so
@@ -13413,6 +13442,35 @@ _job_observed_model() {
   grep -a -m1 '"subtype":"init"' "$1" 2>/dev/null | jq -r '.model // empty' 2>/dev/null | head -1
 }
 
+# _job_logscan <job-dir> -> the fields _job_json derives from out.log, one per line: reads, writes,
+# bash, last marker, observed model, then the progress history lines. Scanning a multi-MB log takes
+# ~10 passes, and every status/fleet/inbox read did it for every job, though a finished job's log
+# never changes. So the result is cached in <job-dir>/.logscan, keyed on the log's size and mtime: a
+# finished job is scanned once, a running one again only after its log grew. The values come from the
+# same greps as before; a missing, unreadable or mismatched cache is simply recomputed.
+_job_logscan() {
+  local jd="$1" L="$1/out.log" key cache="$1/.logscan" r=0 w=0 b=0 last="" obs="" hist=""
+  if [ ! -s "$L" ]; then printf '0\n0\n0\n\n\n'; return 0; fi
+  local n="${OSRC_PROGRESS_HISTORY:-10}" first=""
+  key="$n $(_size_mtime "$L")"
+  if [ -f "$cache" ] && [ ! -L "$cache" ]; then
+    { IFS= read -r first; [ "$first" = "v1 $key" ] && cat; } < "$cache" 2>/dev/null && [ "$first" = "v1 $key" ] && return 0
+  fi
+  # grep -c already prints a count (incl. 0); no or-echo-0 fallback (would double-print)
+  r=$(grep -aco '"name":"\(Read\|Grep\|Glob\)"' "$L" 2>/dev/null); r=${r:-0}
+  w=$(grep -aco '"name":"\(Write\|Edit\|MultiEdit\|NotebookEdit\)"' "$L" 2>/dev/null); w=${w:-0}
+  b=$(grep -aco '"name":"Bash"' "$L" 2>/dev/null); b=${b:-0}
+  last="$(grep -aoE 'OSRC::(PROGRESS|PLAN|BLOCKED|NEED_INPUT|DONE)' "$L" 2>/dev/null | tail -1)"
+  obs="$(_job_observed_model "$L")"
+  hist="$(_job_progress_lines "$L" "$n")"
+  local out; out="$(printf '%s\n%s\n%s\n%s\n%s\n%s' "$r" "$w" "$b" "$last" "$obs" "$hist")"
+  # Cache only when the log did not change while we read it (a live job can append mid-scan).
+  if [ "$n $(_size_mtime "$L")" = "$key" ]; then
+    ( umask 077; { printf 'v1 %s\n' "$key"; printf '%s\n' "$out"; } > "$cache.$$" 2>/dev/null && mv -f "$cache.$$" "$cache" 2>/dev/null ) || rm -f "$cache.$$" 2>/dev/null
+  fi
+  printf '%s\n' "$out"
+}
+
 # _job_json <id> [label] -> one job as a stable JSON object (orchestrator control plane, schema v1).
 # Built from the metadata that already exists on disk; unknown fields are null (never omitted).
 _job_json() {
@@ -13437,16 +13495,11 @@ _job_json() {
   local st exitc last r=0 w=0 b=0 rp=""
   st="$(_reconcile_status "$id" 2>/dev/null || echo unknown)"
   exitc="$(cat "$jd/exit" 2>/dev/null || true)"; case "$exitc" in ''|*[!0-9-]*) exitc=null ;; esac
-  if [ -s "$L" ]; then   # grep -c already prints a count (incl. 0); no or-echo-0 fallback (would double-print)
-    r=$(grep -aco '"name":"\(Read\|Grep\|Glob\)"' "$L" 2>/dev/null); r=${r:-0}
-    w=$(grep -aco '"name":"\(Write\|Edit\|MultiEdit\|NotebookEdit\)"' "$L" 2>/dev/null); w=${w:-0}
-    b=$(grep -aco '"name":"Bash"' "$L" 2>/dev/null); b=${b:-0}
-  fi
-  last="$(grep -aoE 'OSRC::(PROGRESS|PLAN|BLOCKED|NEED_INPUT|DONE)' "$L" 2>/dev/null | tail -1)"
+  local hist obs wtj="null" scan
+  scan="$(_job_logscan "$jd")"
+  { IFS= read -r r; IFS= read -r w; IFS= read -r b; IFS= read -r last; IFS= read -r obs; hist="$(cat)"; } <<<"$scan"   # no forks per field
+  case "$r" in ''|*[!0-9]*) r=0 ;; esac; case "$w" in ''|*[!0-9]*) w=0 ;; esac; case "$b" in ''|*[!0-9]*) b=0 ;; esac
   [ -s "$jd/last.txt" ] && rp="$jd/last.txt"
-  local hist obs wtj="null"
-  hist="$(_job_progress_lines "$L" "${OSRC_PROGRESS_HISTORY:-10}")"
-  obs="$(_job_observed_model "$L")"
   [ -f "$jd/worktree.json" ] && wtj="$(jq -c '{path:(.path // null),branch:(.branch // null),base_sha:(.base_sha // null)}' "$jd/worktree.json" 2>/dev/null)"
   [ -n "$wtj" ] || wtj="null"
   jq -n --slurpfile m "$jd/meta.json" \
