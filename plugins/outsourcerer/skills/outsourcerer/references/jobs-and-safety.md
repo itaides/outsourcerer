@@ -379,8 +379,13 @@ its sign-in URL; `--print-url` prints the URL and exits. It needs `python3` (sta
 - **Command palette.** ⌘K (Ctrl+K) opens a search over every screen, recent run, live session, inbox
   action and settings action. It runs nothing the buttons could not: actions use the same allow-list,
   and destructive ones need a second Enter.
-- **Short cache.** Each endpoint caches its last good answer for a few seconds (inbox 5s, doctor 120s),
-  so a page left open does not re-run the fleet scan on every poll.
+- **Fast reads, honest age.** The slow reads (inbox, status, fleet, brief, doctor, ...) are warmed when the
+  server starts. Within an endpoint's TTL (inbox 5s, doctor 120s) its last answer is served; past it, that
+  answer comes back at once with `X-Osrc-Stale: 1` and a fresh read runs in the background; past
+  `OSRC_DASH_MAX_STALE` (default 120s) it is recomputed before replying. Every answer carries `X-Osrc-Age`.
+  An action clears the cache, and a read that started before the action is never stored after it, so the
+  page always shows what an action changed. Changes made from the CLI outside the page show up within one
+  TTL. `OSRC_DASH_NO_WARM=1` skips the warm-up.
 - **Strict CSP**, `nosniff`, `no-referrer`, `no-store`. The page loads nothing from the network, and the
   request log never prints a query string. It can be framed by another page on 127.0.0.1 or localhost
   (CCC's rail), not by any other site.

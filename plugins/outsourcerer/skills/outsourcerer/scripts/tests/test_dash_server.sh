@@ -118,6 +118,28 @@ printf '%s' "$h" | grep -qi '^x-content-type-options: nosniff' && ok "nosniff he
 [ "$(code "${A[@]}" "$B/../server.py")" = 404 ] && [ "$(code "${A[@]}" "$B/server.py")" = 404 ] && ok "only static assets are served" || bad "served a non-static file"
 [ "$(code "$B/app.js")" = 401 ] && ok "static files need the token too" || bad "static without token"
 
+# --- stale-while-revalidate: a slow read is served from cache at once, then refreshed in the background ---
+LOG2="$TMP/server2.log"
+OSRC_DASH_TTL=1 OSRC_DASH_MAX_STALE=6 OSRC_DASH_NO_WARM=1 python3 "$SRV" --cli "$SRC" --home "$OSRC_HOME" --port 0 > "$LOG2" 2>/dev/null & PID2=$!
+for _ in $(seq 1 50); do grep -q 'dash: open' "$LOG2" 2>/dev/null && break; sleep 0.1; done
+P2="$(sed -n 's#^dash: open http://127.0.0.1:\([0-9]*\)/.*#\1#p' "$LOG2")"
+B2="http://127.0.0.1:$P2"
+hdr() { curl -s -D "$TMP/h2" -o "$TMP/b2" "${A[@]}" "$B2/api/mode"; }
+OSRC_HOME="$OSRC_HOME" bash "$SRC" mode auto >/dev/null 2>&1
+hdr; jq -e '.mode == "auto"' "$TMP/b2" >/dev/null && grep -qi '^x-osrc-stale: 0' "$TMP/h2" && ok "first read is computed and marked fresh" || bad "first read: $(cat "$TMP/h2" "$TMP/b2")"
+OSRC_HOME="$OSRC_HOME" bash "$SRC" mode hybrid >/dev/null 2>&1   # changed behind the server's back (not an action)
+hdr; jq -e '.mode == "auto"' "$TMP/b2" >/dev/null && ok "within the TTL the cached answer is served" || bad "within TTL: $(cat "$TMP/b2")"
+sleep 1.3
+hdr; jq -e '.mode == "auto"' "$TMP/b2" >/dev/null && grep -qi '^x-osrc-stale: 1' "$TMP/h2" && ok "past the TTL the old answer comes back at once, marked stale" || bad "stale read: $(cat "$TMP/h2" "$TMP/b2")"
+grep -qi '^x-osrc-age: [1-9]' "$TMP/h2" && ok "X-Osrc-Age reports how old it is" || bad "age header: $(cat "$TMP/h2")"
+for _ in $(seq 1 30); do hdr; jq -e '.mode == "hybrid"' "$TMP/b2" >/dev/null && break; sleep 0.2; done
+jq -e '.mode == "hybrid"' "$TMP/b2" >/dev/null && ok "the background refresh lands" || bad "refresh never landed: $(cat "$TMP/b2")"
+OSRC_HOME="$OSRC_HOME" bash "$SRC" mode manual >/dev/null 2>&1
+sleep 6.5
+hdr; jq -e '.mode == "manual"' "$TMP/b2" >/dev/null && grep -qi '^x-osrc-stale: 0' "$TMP/h2" && ok "past MAX_STALE it is recomputed before replying" || bad "too-stale read: $(cat "$TMP/h2" "$TMP/b2")"
+kill "$PID2" 2>/dev/null; wait "$PID2" 2>/dev/null
+OSRC_HOME="$OSRC_HOME" bash "$SRC" mode auto >/dev/null 2>&1
+
 # the request log never prints the token
 curl -s "$B/?token=$TOK" >/dev/null
 grep -q "$TOK" "$TMP/server.err" && bad "the token appeared in the request log" || ok "the request log never prints the token"

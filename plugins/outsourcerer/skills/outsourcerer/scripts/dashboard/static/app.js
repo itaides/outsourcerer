@@ -83,12 +83,14 @@ const copyBtn = (argv) => h("button", { class: "ghost small", type: "button", "a
 
 // ---- data ------------------------------------------------------------------------------------------
 const cache = {};
+const ages = {};   // seconds old, per endpoint, as the server reported it (X-Osrc-Age)
 async function api(path) {
   const r = await fetch("/api/" + path, { credentials: "same-origin", cache: "no-store" });
   const ctype = r.headers.get("content-type") || "";
   const body = ctype.includes("json") ? await r.json() : await r.text();
   if (!r.ok) throw Object.assign(new Error((body && body.error) || `HTTP ${r.status}`), { body, status: r.status });
   cache[path] = body;
+  ages[path] = Number(r.headers.get("X-Osrc-Age") || 0);
   return body;
 }
 async function many(paths) {
@@ -126,6 +128,10 @@ async function chrome() {
     $("b-fuel").textContent = c === null || c === undefined ? "" : `${c}%`;
   }
   $("refreshed").textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  // Honest freshness: the page may show a cached answer while a fresher one is computed in the background.
+  const ia = ages.inbox || 0;
+  $("refreshed").title = `Inbox data ${ia}s old` + (ia > 30 ? " (a fresh read is on its way)" : "");
+  $("refreshed").classList.toggle("amber", ia > 60);
 }
 
 // ---- routing ----------------------------------------------------------------------------------------------

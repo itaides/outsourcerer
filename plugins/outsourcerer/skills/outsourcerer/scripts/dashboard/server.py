@@ -184,16 +184,68 @@ def ensure_token(home):
     return tok
 
 
+TTL_OVERRIDE = os.environ.get("OSRC_DASH_TTL")          # tests: one TTL for every endpoint
+MAX_STALE = int(os.environ.get("OSRC_DASH_MAX_STALE", "120"))
+WARM = ["inbox", "status", "fleet", "brief", "doctor", "mode", "heartbeat", "tab", "outcomes", "loops"]
+
+
 class Runner:
-    """Runs allow-listed CLI argv with a short per-endpoint cache and one run per key at a time."""
+    """Runs allow-listed CLI argv, one run per key at a time, with stale-while-revalidate caching.
+
+    Several CLI reads are slow by nature (inbox scans the fleet, brief checks lane logins over the
+    network: 3-5 s each). Within its TTL an answer is served as is. Past it, the last good answer is
+    served at once and a background refresh starts, so a polling page never waits; an answer older
+    than MAX_STALE seconds is recomputed before replying instead. Actions clear the cache, so what an
+    action changed is always read fresh. get() returns (code, ctype, body, age_s, stale).
+    """
 
     def __init__(self, cli, home):
         self.cli, self.home = cli, home
-        self.cache, self.locks, self.guard = {}, {}, threading.Lock()
+        self.cache, self.locks, self.guard, self.refreshing = {}, {}, threading.Lock(), set()
+        self.gen = 0   # bumped by invalidate(): a read that started before an action is never cached after it
+
+    def invalidate(self):
+        with self.guard:
+            self.gen += 1
+            self.cache.clear()
 
     def _lock(self, key):
         with self.guard:
             return self.locks.setdefault(key, threading.Lock())
+
+    def get(self, argv, ttl, kind):
+        ttl = int(TTL_OVERRIDE) if TTL_OVERRIDE else ttl
+        key = "\x1f".join(argv)
+        hit = self.cache.get(key)
+        if hit:
+            age = time.time() - hit[0]
+            if age < ttl:
+                return hit[1], hit[2], hit[3], age, False
+            if age < max(MAX_STALE, ttl):
+                self._refresh_soon(key, argv, ttl, kind)
+                return hit[1], hit[2], hit[3], age, True
+        code, ctype, body = self.run(argv, ttl, kind)
+        return code, ctype, body, 0.0, False
+
+    def _refresh_soon(self, key, argv, ttl, kind):
+        with self.guard:
+            if key in self.refreshing:
+                return
+            self.refreshing.add(key)
+
+        def work():
+            try:
+                self.run(argv, 0, kind)
+            finally:
+                with self.guard:
+                    self.refreshing.discard(key)
+        threading.Thread(target=work, daemon=True).start()
+
+    def warm(self):
+        """Fill the cache for the slow, always-needed reads right after start-up."""
+        for name in WARM:
+            build, ttl, kind = ENDPOINTS[name]
+            threading.Thread(target=self.get, args=(build(None, {}), ttl, kind), daemon=True).start()
 
     def run(self, argv, ttl, kind):
         key = "\x1f".join(argv)
@@ -201,6 +253,7 @@ class Runner:
             hit = self.cache.get(key)
             if hit and time.time() - hit[0] < ttl:
                 return hit[1], hit[2], hit[3]
+            gen = self.gen
             env = dict(os.environ, OSRC_HOME=self.home, OSRC_BLIND_TURN_GUARD="0", NO_COLOR="1")
             try:
                 p = subprocess.run(["bash", self.cli] + argv, stdin=subprocess.DEVNULL, capture_output=True,
@@ -217,7 +270,9 @@ class Runner:
                 res = (200, "application/json", json.dumps(doc, separators=(",", ":")).encode()) if doc is not None \
                       else (502, "application/json", _err(_tail(p.stderr) or "no JSON in the output", argv, p.returncode))
             if res[0] == 200:
-                self.cache[key] = (time.time(),) + res
+                with self.guard:
+                    if gen == self.gen:
+                        self.cache[key] = (time.time(),) + res
             return res
 
 
@@ -229,8 +284,7 @@ def run_action(runner, argv):
         rc, out, err = p.returncode, p.stdout, p.stderr
     except subprocess.TimeoutExpired as e:
         rc, out, err = None, e.stdout or b"", (e.stderr or b"") + b"\n(the action timed out)"
-    with runner.guard:
-        runner.cache.clear()  # whatever the action changed shows on the next read
+    runner.invalidate()  # whatever the action changed shows on the next read
     clip = lambda b: redact(b.decode("utf-8", "replace"))[-8000:]
     return {"command": ["outsourcerer"] + argv, "exit": rc, "ok": rc == 0, "stdout": clip(out), "stderr": clip(err)}
 
@@ -326,8 +380,9 @@ def make_handler(token, runner, port):
             argv = ep[0](arg or None, q)
             if argv is None:
                 return self._json(400, {"error": "bad parameters for %s" % name})
-            code, ctype, body = runner.run(argv, ep[1], ep[2])
-            self._send(code, ctype, body)
+            code, ctype, body, age, stale = runner.get(argv, ep[1], ep[2])
+            self._send(code, ctype, body, {"X-Osrc-Age": str(int(age)), "X-Osrc-Stale": "1" if stale else "0",
+                                           "Access-Control-Expose-Headers": "X-Osrc-Age, X-Osrc-Stale"})
 
         def _static(self, path):
             if path in ("", "/"):
@@ -399,7 +454,10 @@ def main():
         return 0
     srv = ThreadingHTTPServer((host, a.port), None)
     port = srv.server_address[1]
-    srv.RequestHandlerClass = make_handler(token, Runner(a.cli, a.home), port)
+    runner = Runner(a.cli, a.home)
+    srv.RequestHandlerClass = make_handler(token, runner, port)
+    if os.environ.get("OSRC_DASH_NO_WARM") != "1":
+        runner.warm()
     sys.stdout.write("dash: open http://127.0.0.1:%d/?token=%s\n" % (port, token))
     sys.stdout.flush()
     try:
