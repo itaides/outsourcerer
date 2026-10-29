@@ -51,6 +51,8 @@
 #   explain <job-id>               Diagnose a job's terminal state: state + persisted reason +
 #                                  last OSRC:: marker + the _classify_job routing verdict. Degrades
 #                                  gracefully (missing jq/meta/reason -> "(not recorded)").
+#   outcomes [--days N] [--json]   What delegated work achieved (default 90 days): verified rate
+#                                  (passed = a check graded it), the breakdown, per lane x model x class.
 #   wait <job-id> [--for N]        BLOCK until a job is terminal; exit 0 done|done?, 3 blocked|permission-blocked, 1 other failure (failed|wedged|timeout|interrupted|canceled), 124 --for N elapsed while still live. Unlike watch (a bounded ~15s status poll), wait blocks to terminal by default.
 #
 # GEMINI / ANTIGRAVITY LANE (model-alias-selected, like sol/terra/fable, no --provider needed):
@@ -9218,6 +9220,65 @@ _status_to_outcome() {
     *)                  if [ "${sc:-0}" -eq 0 ] 2>/dev/null; then oc=completed_unverified; else oc=blocked; rsn=provider_error; fi ;;
   esac
   printf '%s\t%s' "$oc" "$rsn"
+}
+
+# _outcomes_json <days> -> `outcomes --json`: the outcome rows of the last <days> days, aggregated for
+# the Outcomes screen. "verified" means `passed` only: a row a check (crew promote, loop, land re-check)
+# graded green. completed_unverified (the model said done, nothing checked it) counts as done, never as
+# verified. Rows with a missing or bad ts are skipped, as in the advise fold. Weeks start on Monday (UTC).
+_outcomes_json() {
+  local days="$1" now; now="$(date +%s)"
+  local -a ofiles=(); local _f
+  while IFS= read -r _f; do [ -n "$_f" ] && ofiles+=("$_f"); done < <(_outcomes_files)
+  { [ "${#ofiles[@]}" -eq 0 ] || cat "${ofiles[@]}" 2>/dev/null || true; } | jq -sRc --argjson days "$days" --argjson now "$now" '
+    def nz: if . == "" then null else . end;
+    def cnt(o): map(select(.outcome == o)) | length;
+    def summ: {n:length, passed:cnt("passed"), completed_unverified:cnt("completed_unverified"),
+               failed:cnt("failed"), reverted:cnt("reverted"), blocked:cnt("blocked"),
+               abandoned:cnt("abandoned"), unknown:cnt("unknown")};
+    def pct(a; b): if b == 0 then null else ((a * 1000 / b) | round) / 10 end;
+    def reasons: map(select((.outcome == "blocked" or .outcome == "abandoned") and (.reason // "") != ""))
+                 | group_by(.reason) | map({reason:.[0].reason, n:length}) | sort_by(-.n);
+    [ split("\n")[] | fromjson? // empty | select(type == "object" and .event == "outcome")
+      | . + {t:(try (.ts | fromdateiso8601) catch null)}
+      | select(.t != null and ($now - .t) <= ($days * 86400)) ] as $rows
+    | ($rows | summ) as $s
+    | {schema_version:"1", days:$days, totals:$s,
+       verified_rate_pct:pct($s.passed; $s.n),
+       checked_runs:($s.passed + $s.failed + $s.reverted),
+       matrix:($rows | group_by([(.lane // ""), (.model // ""), (.task_class // "")])
+               | map(summ as $c | {lane:(.[0].lane // "" | nz), model:(.[0].model // "" | nz),
+                     task_class:(.[0].task_class // "" | nz), n:$c.n,
+                     done_pct:pct($c.passed + $c.completed_unverified; $c.n),
+                     verified_pct:pct($c.passed; $c.n),
+                     blocked_pct:pct($c.blocked + $c.abandoned; $c.n),
+                     counts:$c, blocked_reasons:reasons})),
+       trend:($rows | group_by(((.t - 345600) / 604800) | floor)
+              | map(summ as $c | {week_start:(((((.[0].t - 345600) / 604800) | floor) * 604800 + 345600) | todate),
+                    n:$c.n, passed:$c.passed, verified_rate_pct:pct($c.passed; $c.n)}))}'
+}
+
+# cmd_outcomes [--days N] [--json] -> what delegated work actually achieved: the verified rate, the
+# breakdown, and per lane x model x task class. Reads the outcome rows; writes nothing.
+cmd_outcomes() {
+  local days=90 json=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --json) json=1; shift ;;
+      --days) days="${2:-}"; shift 2 2>/dev/null || shift ;;
+      *) die "outcomes: unknown argument '$1' (use --days N, --json)" ;;
+    esac
+  done
+  case "$days" in ''|*[!0-9]*|0) die "outcomes: --days needs a positive whole number" ;; esac
+  have jq || die "outcomes needs jq"
+  local out; out="$(_outcomes_json "$days")" || die "outcomes: could not read the outcome rows"
+  if [ "$json" = 1 ]; then printf '%s\n' "$out"; return 0; fi
+  printf '%s' "$out" | jq -r '
+    def p: if . == null then "—" else "\(.)%" end;
+    "Outcomes, last \(.days) days: \(.totals.n) runs · verified \(.verified_rate_pct | p)",
+    "  passed \(.totals.passed) · done (unverified) \(.totals.completed_unverified) · failed \(.totals.failed) · reverted \(.totals.reverted) · blocked \(.totals.blocked) · abandoned \(.totals.abandoned)",
+    (if .totals.n > 0 and .checked_runs == 0 then "  No run had a check, so nothing is verified. Add one: loop verify --check, crew --check, or land." else empty end),
+    (.matrix | sort_by(-.n) | .[] | "  \(.lane // "?") \(.model // "?") [\(.task_class // "?")]  n=\(.n)  done \(.done_pct | p)  verified \(.verified_pct | p)  blocked \(.blocked_pct | p)")'
 }
 
 # _history_mult <lane> <model> <category> -> "mult|n_eff|passed_eff|scope"
@@ -21957,7 +22018,8 @@ main() {
     cancel)      cmd_cancel "$@" ;;                        # kill a job + mark canceled
     cleanup)     cmd_cleanup "$@" ;;                       # remove a job/fanout git worktree (conservative)
     gc)          cmd_gc "$@" ;;                            # remove old completed job dirs (gc --older-than DAYS)
-    tab)         cmd_tab "$@" ;;                           # the Tab: ledger / savings summary
+    tab)         cmd_tab "$@" ;;
+    outcomes)    cmd_outcomes "$@" ;;                      # what delegated work achieved: verified rate, lane x model x task class                           # the Tab: ledger / savings summary
     sanitize)    cmd_sanitize "$@" ;;                      # scrub fallback-trigger vocab from prose/state/commit files (--write applies)
     estimate)    cmd_estimate "$@" ;;                      # quote table across the chain + Opus
     suggest|deals) cmd_suggest "$@" ;;                     # live low-cash and plan-included models

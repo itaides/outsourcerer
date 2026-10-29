@@ -330,6 +330,7 @@ The plain-text output of every command is unchanged.
 | `exclude ls --json` | `entries[]` (`entry`, `source`: `saved` or `env`), `invalid[]` |
 | `limits status --json` | `caps[]` (`key`, `lane`, `model`, `per_day`, `reset`, `used_today`) |
 | `heartbeat status --json` | `armed`, `pid` (exit code is still 1 when nothing is armed) |
+| `outcomes [--days N] --json` | `days`, `totals` (`n`, `passed`, `completed_unverified`, `failed`, `reverted`, `blocked`, `abandoned`, `unknown`), `verified_rate_pct`, `checked_runs`, `matrix[]` (`lane`, `model`, `task_class`, `n`, `done_pct`, `verified_pct`, `blocked_pct`, `counts`, `blocked_reasons[]`), `trend[]` (`week_start`, `n`, `passed`, `verified_rate_pct`) |
 | `loop status [id] --json` | `loops[]` (`loop_id`, `shape`, `state`, `task`, `check`, `model`, `verb`, `worktree`, `started`, `elapsed_s`, `attempt`, `last_failure`, `stop_rules` (`max_attempts`, `max_minutes`, `same_failure_guard`), `attempts[]` (`n`, `passed`, `first_failure`), `receipts[]` for escalate loops). Task, check and failure text are redacted. |
 
 `status --json` also carries the run detail a dashboard drawer needs: `progress.line` and
