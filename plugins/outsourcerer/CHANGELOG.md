@@ -2,6 +2,13 @@
 
 All notable changes to the Outsourcerer plugin are documented here.
 
+## Unreleased
+
+### Added
+
+- **`--json` for the read-only commands.** `brief`, `tab`, `estimate`, `explain`, and the status form of `mode`, `consent`, `exclude`, `limits` and `heartbeat` can print one line of JSON, so a dashboard or script reads the same facts without parsing prose. Unknown values are `null`, never a guess, and the plain-text output is unchanged. `brief --json` also gives the conserve decision as fields (binding window, threshold, whether it is active). Field list: `references/jobs-and-safety.md`.
+- **Run detail for dashboards.** `status --json` adds `progress.line` and `progress.history` (marker text, redacted), `observed_model`, `watchdog` limits, `worktree` and `verify`. `logs <id> --masked --tail N` redacts secrets in the tail. `loop status [id] --json` gives each loop's attempts, last failure and stop rules.
+
 ## 0.15.2
 
 ### Fixed
