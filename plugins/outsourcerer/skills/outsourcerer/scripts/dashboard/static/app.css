@@ -159,6 +159,24 @@ tr.sel td { background: var(--s2); }
 .node.running { border-color: var(--ac); }
 .badge2 { font-size: 10.5px; padding: 0 6px; border-radius: 4px; border: 1px solid var(--bd2); color: var(--mu); }
 
+/* command palette (⌘K) */
+kbd { font-family: var(--mono); font-size: 10.5px; padding: 0 5px; border: 1px solid var(--bd2); border-radius: 4px; color: var(--mu); background: var(--s2); }
+.kbd-hint { display: inline-flex; gap: 8px; align-items: center; border: 1px solid var(--bd) !important; color: var(--fa); }
+.palette-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 30; display: flex; justify-content: center; align-items: flex-start; padding: 12vh 16px 16px; }
+.palette { width: min(640px, 100%); background: var(--s1); border: 1px solid var(--bd2); border-radius: 10px; box-shadow: 0 24px 64px rgba(0,0,0,.5); display: flex; flex-direction: column; overflow: hidden; max-height: 70vh; }
+.palette input { border: 0; border-bottom: 1px solid var(--bd); border-radius: 0; background: transparent; padding: 14px 16px; font-size: 15px; outline: none; }
+.palette-list { overflow-y: auto; padding: 6px; }
+.palette-group { padding: 8px 10px 4px; color: var(--fa); font-size: 11.5px; }
+.palette-item { display: flex; gap: 10px; align-items: baseline; padding: 8px 10px; border-radius: 6px; cursor: pointer; }
+.palette-item[aria-selected="true"] { background: var(--s3); }
+.palette-item .pt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.palette-item .ps { color: var(--fa); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 45%; }
+.palette-item mark { background: transparent; color: var(--act); font-weight: 600; }
+.palette-item.armed .pt { color: var(--rd); }
+.palette-empty { padding: 18px 12px; color: var(--mu); }
+.palette-foot { display: flex; gap: 14px; padding: 8px 14px; border-top: 1px solid var(--bd); }
+@media (max-width: 860px) { .kbd-hint kbd { display: none; } .palette-backdrop { padding-top: 8vh; } }
+
 .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--pri); color: var(--prit); padding: 8px 14px; border-radius: 6px; font-size: 12.5px; z-index: 20; max-width: 90vw; }
 .err { border: 1px solid var(--rd); background: var(--rds); color: var(--rd); border-radius: 6px; padding: 10px 12px; }
 

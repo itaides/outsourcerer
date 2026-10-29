@@ -31,6 +31,7 @@
       <span class="pill" id="mode-pill" title="Driving mode (outsourcerer mode)">…</span>
       <a class="pill red" id="needs-pill" href="#needs" hidden></a>
       <span class="grow"></span>
+      <button class="ghost small kbd-hint" id="palette-btn" type="button" aria-label="Open the command palette" aria-keyshortcuts="Meta+K Control+K">Search or run… <kbd>⌘K</kbd></button>
       <span class="muted small">Refreshed <span class="mono" id="refreshed">—</span></span>
       <span class="dot-label small" id="hb"><span class="dot gray"></span>Heartbeat</span>
       <button class="ghost small" id="theme" type="button" aria-label="Toggle light or dark theme">◐</button>
@@ -39,6 +40,13 @@
   </div>
 </div>
 <aside class="drawer" id="drawer" hidden aria-label="Run detail"></aside>
+<div class="palette-backdrop" id="palette" hidden>
+  <div class="palette" role="dialog" aria-modal="true" aria-label="Command palette">
+    <input id="palette-input" type="text" role="combobox" aria-expanded="true" aria-controls="palette-list" aria-autocomplete="list" autocomplete="off" spellcheck="false" placeholder="Type a command, a run, a session…">
+    <div id="palette-list" class="palette-list" role="listbox" aria-label="Commands"></div>
+    <div class="palette-foot faint small"><span><kbd>↑</kbd><kbd>↓</kbd> move</span><span><kbd>↵</kbd> run</span><span><kbd>esc</kbd> close</span></div>
+  </div>
+</div>
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 </body>
 </html>

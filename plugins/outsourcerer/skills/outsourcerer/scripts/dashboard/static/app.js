@@ -318,7 +318,7 @@ SCREENS.live = { every: 5, async render(v) {
 
 let drawerFor = null;
 function closeDrawer() { drawerFor = null; $("drawer").hidden = true; $("drawer").replaceChildren(); }
-document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("drawer").hidden) closeDrawer(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("drawer").hidden && $("palette").hidden) closeDrawer(); });
 function drawerShell(title, sub, ...parts) {
   put($("drawer"),
     h("div", { style: "display:flex;gap:12px;align-items:flex-start" }, h("div", { class: "grow" }, h("h2", {}, title), sub ? h("div", { class: "mono faint" }, sub) : null),
@@ -649,15 +649,120 @@ SCREENS.settings = { every: 30, async render(v) {
       h("dt", {}, "Version"), h("dd", { class: "mono" }, failed(d.doctor) ? "—" : d.doctor.version))));
 } };
 
+// ---- command palette (⌘K / Ctrl+K) ------------------------------------------------------------------------------------
+// Every command is something the page can already do: go to a screen, open a run or session, or run one allow-listed
+// action. Entries are built fresh from the data the page last fetched, so the palette never shows a stale action twice.
+function themeToggle() {
+  const dark = (document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark")) === "dark";
+  document.documentElement.dataset.theme = dark ? "light" : "dark";
+  try { localStorage.setItem("osrc-theme", document.documentElement.dataset.theme); } catch (e) { /* storage blocked */ }
+}
+function paletteCommands() {
+  const go = (r, label, hint) => ({ group: "Go to", title: label, sub: hint, keys: label + " " + r, run: () => { location.hash = r; } });
+  const cmds = [
+    go("needs", "Needs you", "what is blocked on you"), go("live", "Live runs", "jobs, sessions, groups, loops"),
+    go("fuel", "Fuel", "limits and the Tab"), go("outcomes", "Outcomes", "verified rate, heatmap"),
+    go("plans", "Plans", "graphs, decisions, land queue"), go("delegate", "New delegation", "advise + estimate"),
+    go("lanes", "Lanes", "doctor, never-use, caps"), go("settings", "Settings", "mode, consent, tap"),
+  ];
+  const act = (group, title, argv, sub) => ({ group, title, sub: sub || cmdline(argv), keys: title + " " + argv.join(" "), argv,
+    danger: DESTRUCTIVE(argv), run: () => runAction(argv) });
+  const ib = cache.inbox;
+  if (ib && ib.items) ib.items.forEach((it) => {
+    const a = it.primary_action;
+    if (a && a.input !== "answer") cmds.push(act("Needs you", `${a.label}: ${it.title}`, a.argv, kindLabel(it.kind) + (it.repo ? " · " + it.repo : "")));
+    else if (a) cmds.push({ group: "Needs you", title: `Answer: ${it.title}`, sub: "opens the row to type your answer", keys: "answer " + it.title,
+      run: () => { location.hash = "needs"; } });
+    if (it.secondary_action) cmds.push(act("Needs you", `${it.secondary_action.label}: ${it.title}`, it.secondary_action.argv));
+  });
+  const st = cache.status;
+  if (st && st.jobs) st.jobs.slice(0, 25).forEach((j) => cmds.push({ group: "Runs", title: `${nz(j.label, j.verb)} · ${nz(j.provider)} ${nz(j.model, "")}`,
+    sub: `${j.status} · ${j.job_id}`, keys: [j.label, j.verb, j.provider, j.model, j.job_id, j.status, repoOf(j.cwd)].join(" "),
+    run: () => { if (current !== "live") location.hash = "live"; setTimeout(() => openJob(j.job_id), current === "live" ? 0 : 400); } }));
+  const fl = cache.fleet;
+  // Live sessions first (most recent activity first); ended/dead ones are not worth a command. Registry
+  // mirrors carry a generic summary ("external session"), so those are named by their id instead.
+  const generic = /^(external|managed) session$/;
+  const rank = (x) => (["blocked?", "blocked", "unresponsive?"].includes(x.state) ? 0 : x.state === "working" ? 1 : 2);
+  if (fl && fl.items) fl.items.filter((x) => x.owner !== "managed" && (x.self || 0) === 0 && x.session_id && !["ended", "dead"].includes(x.state))
+    .sort((a, b) => rank(a) - rank(b) || (a.status_age || 0) - (b.status_age || 0)).slice(0, 25).forEach((x) => {
+      const name = [x.display_name, x.task_summary].find((n) => n && !generic.test(n)) || x.session_id;
+      cmds.push(act("Sessions", `Read ${name}`, ["outsourcerer", "fleet", "show", x.session_id],
+        `${nz(x.state_label || x.state)} · ${nz(repoOf(x.cwd), x.harness || "")}`));
+    });
+  const mode = cache.mode && cache.mode.mode;
+  [["auto", "Auto-pilot"], ["hybrid", "Hybrid"], ["manual", "You-drive"]].forEach(([k, l]) => { if (k !== mode) cmds.push(act("Actions", `Switch mode to ${l}`, ["outsourcerer", "mode", k])); });
+  if (cache.heartbeat && !cache.heartbeat.armed) cmds.push(act("Actions", "Arm the heartbeat", ["outsourcerer", "heartbeat", "start"], "supervise runs while you are away"));
+  if (cache.tap && !cache.tap.installed) cmds.push(act("Actions", "Install the limits tap", ["outsourcerer", "tap", "install"], "live Claude limits for Fuel"));
+  cmds.push({ group: "Actions", title: "Toggle light / dark theme", sub: "", keys: "theme light dark", run: themeToggle });
+  cmds.push({ group: "Actions", title: "Refresh now", sub: "", keys: "refresh reload", run: () => refresh() });
+  return cmds;
+}
+// Fuzzy match: every query character in order; earlier, contiguous and word-start hits score higher.
+function fuzzy(q, text) {
+  const t = text.toLowerCase(); let score = 0, ti = 0, prev = -2; const hits = [];
+  for (const ch of q.toLowerCase()) {
+    if (ch === " ") continue;
+    const i = t.indexOf(ch, ti); if (i < 0) return null;
+    score += (i === prev + 1 ? 6 : 1) + (i === 0 || /[\s·:/_-]/.test(t[i - 1]) ? 4 : 0) - Math.min(i, 30) * 0.02;
+    hits.push(i); prev = i; ti = i + 1;
+  }
+  return { score, hits };
+}
+function marked(text, hits) {
+  const set = new Set(hits); const out = []; let buf = "", on = false;
+  [...text].forEach((c, i) => { const m = set.has(i); if (m !== on) { if (buf) out.push(on ? h("mark", {}, buf) : buf); buf = ""; on = m; } buf += c; });
+  if (buf) out.push(on ? h("mark", {}, buf) : buf);
+  return out;
+}
+const pal = { open: false, all: [], shown: [], sel: 0, armed: -1, last: null };
+function paletteOpen() {
+  pal.open = true; pal.all = paletteCommands(); pal.sel = 0; pal.armed = -1; pal.last = document.activeElement;
+  $("palette").hidden = false; $("palette-input").value = ""; paletteRender(); $("palette-input").focus();
+  // Sessions and the tap state may not have been fetched yet (they load with Live / Settings): fetch them now,
+  // then rebuild the list without moving the selection the user already has.
+  many(["fleet", "tap", "inbox", "status", "mode", "heartbeat"]).then(() => { if (pal.open) { pal.all = paletteCommands(); paletteRender(); } });
+}
+function paletteClose() { pal.open = false; $("palette").hidden = true; if (pal.last && pal.last.focus) pal.last.focus(); }
+function paletteRender() {
+  const q = $("palette-input").value.trim();
+  pal.shown = q ? pal.all.map((c) => { const m = fuzzy(q, c.title) || fuzzy(q, c.keys); return m ? { c, m, t: fuzzy(q, c.title) } : null; })
+    .filter(Boolean).sort((a, b) => b.m.score - a.m.score).slice(0, 40) : pal.all.slice(0, 60).map((c) => ({ c, m: null, t: null }));
+  if (pal.sel >= pal.shown.length) pal.sel = Math.max(0, pal.shown.length - 1);
+  const list = $("palette-list"), nodes = []; let group = null;
+  pal.shown.forEach((r, i) => {
+    if (!q && r.c.group !== group) { group = r.c.group; nodes.push(h("div", { class: "palette-group", role: "presentation" }, group)); }
+    nodes.push(h("div", { class: "palette-item" + (pal.armed === i ? " armed" : ""), role: "option", id: "pal-" + i, "aria-selected": String(i === pal.sel),
+      onmousemove: () => { if (pal.sel !== i) { pal.sel = i; paletteRender(); } }, onclick: () => { pal.sel = i; paletteRun(); } },
+      h("span", { class: "pt" }, pal.armed === i ? "Press Enter again to confirm: " : "", r.t ? marked(r.c.title, r.t.hits) : r.c.title),
+      q ? h("span", { class: "ps" }, r.c.group) : null, h("span", { class: "ps" }, r.c.sub || "")));
+  });
+  put(list, nodes.length ? nodes : h("div", { class: "palette-empty" }, "No command matches."));
+  $("palette-input").setAttribute("aria-activedescendant", pal.shown.length ? "pal-" + pal.sel : "");
+  const el = $("pal-" + pal.sel); if (el) el.scrollIntoView({ block: "nearest" });
+}
+function paletteRun() {
+  const r = pal.shown[pal.sel]; if (!r) return;
+  if (r.c.danger && pal.armed !== pal.sel) { pal.armed = pal.sel; paletteRender(); return; }   // cancel / revoke / reset ask twice
+  paletteClose(); r.c.run();
+}
+document.addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); pal.open ? paletteClose() : paletteOpen(); return; }
+  if (!pal.open) return;
+  if (e.key === "Escape") { e.preventDefault(); paletteClose(); }
+  else if (e.key === "ArrowDown") { e.preventDefault(); pal.sel = Math.min(pal.shown.length - 1, pal.sel + 1); pal.armed = -1; paletteRender(); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); pal.sel = Math.max(0, pal.sel - 1); pal.armed = -1; paletteRender(); }
+  else if (e.key === "Enter") { e.preventDefault(); paletteRun(); }
+});
+$("palette-input").addEventListener("input", () => { pal.sel = 0; pal.armed = -1; paletteRender(); });
+$("palette").addEventListener("mousedown", (e) => { if (e.target === $("palette")) paletteClose(); });
+$("palette-btn").addEventListener("click", paletteOpen);
+
 // ---- theme + boot ------------------------------------------------------------------------------------------------------
 (function theme() {
   let t = null;
   try { t = localStorage.getItem("osrc-theme"); } catch (e) { /* storage blocked */ }
   if (t) document.documentElement.dataset.theme = t;
-  $("theme").addEventListener("click", () => {
-    const dark = (document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark")) === "dark";
-    document.documentElement.dataset.theme = dark ? "light" : "dark";
-    try { localStorage.setItem("osrc-theme", document.documentElement.dataset.theme); } catch (e) { /* ignore */ }
-  });
+  $("theme").addEventListener("click", themeToggle);
 })();
 route();

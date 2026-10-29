@@ -376,6 +376,9 @@ its sign-in URL; `--print-url` prints the URL and exits. It needs `python3` (sta
   also needs the `X-Osrc-Dash: 1` header and a JSON content type, which a cross-site form cannot send.
   The output is redacted with the same patterns as `explain`, and the read cache is cleared. The page
   asks for a second click before cancel, consent revoke and posture reset. Anything else is a 403.
+- **Command palette.** ⌘K (Ctrl+K) opens a search over every screen, recent run, live session, inbox
+  action and settings action. It runs nothing the buttons could not: actions use the same allow-list,
+  and destructive ones need a second Enter.
 - **Short cache.** Each endpoint caches its last good answer for a few seconds (inbox 5s, doctor 120s),
   so a page left open does not re-run the fleet scan on every poll.
 - **Strict CSP**, `nosniff`, `no-referrer`, `no-store`. The page loads nothing from the network, and the
