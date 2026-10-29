@@ -312,3 +312,24 @@ Scope today: Claude Code sessions + Outsourcerer's own delegated jobs. It does *
 ## Subcommand index and failure-state notes
 
 Core: `brief` · `mode` · `consent` · `run`/`explore`/`research`/`edit`/`yolo` · `bg`/`fanout` (+ `status`/`watch`/`result`/`cancel`) · `fleet` (`ls`/`show`/`name`/`supervise`, one view of your Claude Code sessions + delegated jobs; see below) · `advise` · `doctor` · `models`. More: `suggest`/`deals` (cheap now) · `estimate` (cost quote) · `tab` (the ledger) · `second-opinion` · `image` · `continue` · `tap` (capture live limits without token-optimizer) · `sanitize` (scrub fallback-trigger vocabulary from state/todo/memory/commit prose; `--write` applies; `references/vocabulary-hygiene.md`) · `parity`/`parity-codex`/`parity-droid`/`parity-cursor`/`parity-hermes` (two-way bridges) · `posture` (show/reset remembered lane org-policy restrictions) · `classify` (post-hoc verdict for a terminated job: `REUSE-OUTPUT` / `RETRY-DIFFERENT-LANE` / `REAL-FAIL`, deterministic, zero-LLM; see "Post-hoc classification" above) · `cleanup`/`gc`. Failure states map to one-line user messages (`launching`→`running`→ `done`/`done?`/`blocked`/`permission-blocked`/`interrupted`/`timeout`/`wedged`/`failed`), as described under "Job states" above. `permission-blocked` (a headless delegate hit a wall it can't confirm, e.g. devin print-mode) is NOT `blocked`: re-run with `yolo` or restructure the prompt, don't just read the result. `launching` that never becomes `running` → `failed` (stillborn: the environment killed the detached worker; run foreground).
+
+## Machine-readable output (`--json`)
+
+Dashboards and scripts read these instead of the prose. Each prints one line of JSON with
+`"schema_version":"1"`, uses `null` for anything unknown (never a guessed value), and needs `jq`.
+The plain-text output of every command is unchanged.
+
+| Command | Main fields |
+|---|---|
+| `brief --json` | `lanes_installed[]`, `limits` (`claude_5h_pct`, `claude_7d_pct`, `codex_5h_pct`, `codex_weekly_pct`, `codex_reading_age_s`), `conserve` (`threshold_pct`, `binding_pct`, `active`, `recommendation`), `notices[]`, `exclude[]`, `mode` |
+| `tab --json` | `runs`, `cash_measured_usd`, `cash_estimated_usd`, `cash_unmeasured_runs`, `plan_runs`, `plans[]` (`plan`, `runs`), `local_runs`, `by_model[]`, `skipped_lines` |
+| `estimate --json "<task>"` | `prompt_tokens`, `pricing_cached`, `cash_chain[]` (`model`, `usd`), `plan_lanes[]` (`lane`, `label`, `cost`), `counterfactual_opus_usd` |
+| `explain <job-id> --json` | `state`, `exit`, `verb`, `model`, `provider`, `reason`, `error`, `marker`, `verdict` (`label`, `reason`), `evidence[]` (redacted) |
+| `mode status --json` | `mode`, `meaning`, `invalid_file` |
+| `consent status --json` | `granted`, `granted_at` |
+| `exclude ls --json` | `entries[]` (`entry`, `source`: `saved` or `env`), `invalid[]` |
+| `limits status --json` | `caps[]` (`key`, `lane`, `model`, `per_day`, `reset`, `used_today`) |
+| `heartbeat status --json` | `armed`, `pid` (exit code is still 1 when nothing is armed) |
+
+`status --json`, `fleet ls --json`, `fanout status --json`, `classify --json`, `advise --json` and the
+factory `plan`/`task` `--json` forms are documented with their commands.

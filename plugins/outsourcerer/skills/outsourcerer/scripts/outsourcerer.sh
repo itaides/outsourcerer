@@ -5,6 +5,9 @@
 # Subcommands:
 #   doctor                         Preflight: platform, state-home writability, lanes, auth, consent.
 #   brief                          Session-start handshake: ready lanes, live limits, conserve rec, mode.
+#   --json                         Machine-readable output (one JSON line, schema_version 1, needs jq) for
+#                                  brief, tab, estimate, explain, status, and the status form of mode,
+#                                  consent, exclude, limits and heartbeat.
 #   mode [status|auto|manual|hybrid|reset]   The copilot driving mode (persisted, remembered once).
 #   consent status|grant|revoke    Cloud-disclosure consent, remembered ONCE in ~/.outsourcerer
 #                                  (the secret-scan still runs on every delegation regardless).
@@ -365,6 +368,19 @@ _cloud_consent_persist() {
     && mv -f "$tmp" "$OSRC_CONSENT_FILE" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; true; }
 }
 cmd_consent() {
+  if [ "${1:-}" = "--json" ] || { [ "${1:-}" = "status" ] && [ "${2:-}" = "--json" ]; }; then
+    _json_need_jq consent
+    if [ -f "$OSRC_CONSENT_FILE" ]; then
+      local at by
+      at="$(sed -n 's/^granted-at: //p' "$OSRC_CONSENT_FILE" 2>/dev/null | head -1)"
+      by="$(sed -n 's/^by: //p' "$OSRC_CONSENT_FILE" 2>/dev/null | head -1)"
+      jq -cn --arg at "$at" --arg by "$by" \
+        '{schema_version:"1", granted:true, granted_at:(if $at=="" then null else $at end), by:(if $by=="" then null else $by end)}'
+    else
+      printf '{"schema_version":"1","granted":false,"granted_at":null,"by":null}\n'
+    fi
+    return 0
+  fi
   case "${1:-status}" in
     status) if [ -f "$OSRC_CONSENT_FILE" ]; then echo "cloud consent: GRANTED (remembered)"; sed 's/^/  /' "$OSRC_CONSENT_FILE" 2>/dev/null
             else echo "cloud consent: not granted. First cloud delegation will ask once (or pass --cloud-ack) and be remembered."; fi ;;
@@ -482,9 +498,36 @@ _mode_persist() {
     || { rm -f "$tmp" 2>/dev/null; die "mode: cannot replace $OSRC_MODE_FILE"; }
 }
 
+# ---- --json for read-only commands ------------------------------------------------------------
+# Dashboards and other machine readers parse these instead of the prose. Every payload is ONE line of
+# JSON with "schema_version":"1"; a field that is unknown is null, never a guessed value. --json needs jq
+# (the same contract as `status --json`); the plain-text output is unchanged.
+# _json_flag_split "$@" -> _JSON=1 when a bare --json argument is present, _JSON_ARGS = the rest.
+_json_flag_split() {
+  _JSON=0; _JSON_ARGS=()
+  local a
+  for a in "$@"; do
+    if [ "$a" = "--json" ]; then _JSON=1; else _JSON_ARGS+=("$a"); fi
+  done
+}
+_json_need_jq() { have jq || die "$1 --json needs jq"; }
+
 cmd_mode() {
+  _json_flag_split "$@"; local json="$_JSON"
+  set -- ${_JSON_ARGS[@]+"${_JSON_ARGS[@]}"}
   local action="${1:-status}"
   [ "$#" -le 1 ] || die "mode: '$action' takes no extra arguments (got: $*)"
+  if [ "$json" = "1" ]; then
+    [ "$action" = "status" ] || die "mode: --json only applies to 'mode status'"
+    _json_need_jq mode
+    local cur="" meaning="" invalid=false
+    if cur="$(_mode_read 2>/dev/null)"; then meaning="$(_mode_meaning "$cur")"
+    else cur=""; [ -f "$OSRC_MODE_FILE" ] && invalid=true; fi
+    jq -cn --arg m "$cur" --arg meaning "$meaning" --argjson invalid "$invalid" \
+      '{schema_version:"1", mode:(if $m=="" then null else $m end),
+        meaning:(if $meaning=="" then null else $meaning end), invalid_file:$invalid}'
+    return 0
+  fi
   case "$action" in
     status)
       local mode; if mode="$(_mode_read)"; then printf 'driving mode: %s\n  %s\n' "$mode" "$(_mode_meaning "$mode")"
@@ -6071,9 +6114,27 @@ _exclude_engine_default_notice() {
 
 cmd_exclude() {
   local action="${1:-ls}"; [ "$#" -gt 0 ] && shift
+  [ "$action" = "--json" ] && { action=ls; set -- --json ${1+"$@"}; }
   local m lm cur keep line nl removed e cov
   case "$action" in
     ls|list|status)
+      if [ "${1:-}" = "--json" ]; then
+        _json_need_jq exclude
+        _exclude_active >/dev/null 2>&1 || true
+        local saved; saved="$(_exclude_saved_entries)"
+        {
+          printf '%s' "$_OSRC_EXCL_LIST" | while IFS= read -r e; do
+            [ -n "$e" ] || continue
+            if printf '%s\n' "$saved" | grep -qxF -- "$e"; then printf 'saved\t%s\n' "$e"; else printf 'env\t%s\n' "$e"; fi
+          done
+          printf '%s' "$_OSRC_EXCL_BAD" | while IFS= read -r e; do
+            [ -n "$e" ] && printf 'invalid\t%s\n' "$e"
+          done
+        } | jq -Rsc '[split("\n")[] | select(length > 0) | split("\t") | {source: .[0], entry: .[1]}] as $r
+          | {schema_version:"1", entries: [$r[] | select(.source != "invalid")],
+             invalid: [$r[] | select(.source == "invalid") | .entry]}'
+        return 0
+      fi
       if ! _exclude_active; then
         echo "no models excluded. Add one with: $0 exclude add <model-or-family>   (e.g. exclude add fable)"
         return 0
@@ -6238,7 +6299,8 @@ _quota_reason() {  # <disp> <model>
 cmd_limits() {
   case "${1:-status}" in
     set)         shift; _limits_set "$@" ;;
-    list|status) _limits_status ;;
+    list|status) [ "$#" -gt 0 ] && shift; _limits_status ${1+"$@"} ;;
+    --json)      _limits_status --json ;;
     clear|rm)    shift; _limits_clear "$@" ;;
     *)           die "limits: unknown action '${1:-}' (use: set <lane> <model> <N>/day [--reset utc|local] | status | clear <lane> <model>)" ;;
   esac
@@ -6265,6 +6327,25 @@ _limits_set() {
   printf 'limits: %s = %s/day (reset %s)\n' "$key" "$n" "$reset"
 }
 _limits_status() {
+  if [ "${1:-}" = "--json" ]; then
+    _json_need_jq limits
+    [ -f "$OSRC_QUOTA_FILE" ] || { printf '{"schema_version":"1","caps":[]}\n'; return 0; }
+    local key per reset lane model used rows=""
+    while IFS="$(printf '\t')" read -r key per reset; do
+      [ -n "$key" ] || continue
+      case "$key" in *:*) lane="${key%%:*}"; model="${key#*:}" ;; *) lane=""; model="$key" ;; esac
+      if [ -n "$lane" ]; then used="$(_quota_used_today "$lane" "$model" "$reset")"; else used=""; fi
+      rows="$rows$key"$'\t'"$lane"$'\t'"$model"$'\t'"$per"$'\t'"$reset"$'\t'"$used"$'\n'
+    done <<EOF
+$(jq -r '.models | to_entries[] | "\(.key)\t\(.value.per_day)\t\(.value.reset // "utc")"' "$OSRC_QUOTA_FILE" 2>/dev/null)
+EOF
+    printf '%s' "$rows" | jq -Rsc '[split("\n")[] | select(length > 0) | split("\t")
+      | {key: .[0], lane: (if .[1] == "" then null else .[1] end), model: .[2],
+         per_day: (.[3] | tonumber? // null), reset: .[4],
+         used_today: (if (.[5] // "") == "" then null else (.[5] | tonumber? // null) end)}]
+      | {schema_version:"1", caps: .}'
+    return 0
+  fi
   [ -f "$OSRC_QUOTA_FILE" ] || { echo "no per-model daily caps declared (every model is unlimited). Declare one: $0 limits set <lane> <model> 50/day"; return 0; }
   have jq || die "limits needs jq"
   echo "declared per-model daily caps (used today / cap):"
@@ -8741,8 +8822,19 @@ cmd_heartbeat() { # start | status -- the manual arm/remediation command the NOT
       esac
       return "$rc"
       ;;
+    --json) cmd_heartbeat status --json; return $? ;;
     status)
       local pid
+      if [ "${2:-}" = "--json" ]; then
+        _json_need_jq heartbeat
+        if _heartbeat_leader_alive; then
+          pid="$(jq -r '.pid // empty' "$OSRC_HEARTBEAT/leader/owner.json" 2>/dev/null)"
+          jq -cn --arg pid "$pid" '{schema_version:"1", armed:true, pid:($pid | tonumber? // null)}'
+          return 0
+        fi
+        printf '{"schema_version":"1","armed":false,"pid":null}\n'
+        return 1
+      fi
       if _heartbeat_leader_alive; then
         pid="$(jq -r '.pid // empty' "$OSRC_HEARTBEAT/leader/owner.json" 2>/dev/null)"
         echo "heartbeat leader pid ${pid:-?} verified live"
@@ -9559,30 +9651,10 @@ EOF
   printf '%s\n' "${line# }"
 }
 
-cmd_tab() {
-  # An empty or absent ledger is an empty Tab. Decide BEFORE printing the header so the render is
-  # identical whether the file is missing, zero-length, or whitespace-only (the normal state between
-  # install and the first recorded run — record_ledger pre-creates an empty ledger.jsonl). Printing
-  # the "== The Tab ==" banner first and then "The Tab is empty" was a garbled papercut.
-  # NOTE: grep -c prints "0" AND exits 1 when nothing matches, so an or-echo-0 fallback after it produced
-  # "0\n0" on an empty-but-existing ledger and the arithmetic below crashed the whole Tab (#21
-  # follow-up). Take the first line and default to 0 instead; an empty ledger is an empty Tab.
-  local _tot=0 _good _bad
-  if [ -f "$OSRC_LEDGER" ]; then
-    _tot="$(grep -cve '^[[:space:]]*$' "$OSRC_LEDGER" 2>/dev/null | head -1)"
-    case "$_tot" in ''|*[!0-9]*) _tot=0 ;; esac
-  fi
-  [ "$_tot" -eq 0 ] && { echo "The Tab is empty (no offloads recorded yet)."; return 0; }
-  have jq || { echo "jq needed for tab (brew install jq)"; return 0; }
-  echo "== The Tab (outsourcerer ledger: $OSRC_LEDGER) =="
-  # RESILIENT PARSE: pre-filter with `fromjson? // empty` so ONE malformed/interleaved
-  # ledger line (plausible under the flock-fallback append warned about in record_ledger) drops just
-  # that row instead of failing the whole `jq -rs` slurp and blanking the entire Tab. Warn on stderr
-  # if rows were dropped so a corrupted ledger is visible, not silent.
-  _good="$(jq -Rc 'fromjson? | select(type=="object")' "$OSRC_LEDGER" 2>/dev/null | grep -c '^' 2>/dev/null | head -1)"; _good="${_good:-0}"
-  case "$_good" in ''|*[!0-9]*) _good=0 ;; esac
-  _bad=$(( _tot - _good )); [ "$_bad" -lt 0 ] && _bad=0
-  jq -R 'fromjson? | select(type=="object")' "$OSRC_LEDGER" 2>/dev/null | jq -rs '
+# _tab_jq_defs -> the jq definitions that bucket ledger rows (cash / plan / local), shared by the
+# text Tab and `tab --json` so the two can never disagree about which lane is cash.
+_tab_jq_defs() {
+  cat <<'_OSRC_TAB_DEFS'
     # cashnum: numeric magnitude of the cost, treating "~est" as its number and blank/garbage as 0.
     def cashnum: (.cost_usd // "") as $c
       | if $c=="" then 0 elif ($c|startswith("~")) then ($c[1:]|tonumber? // 0) else ($c|tonumber? // 0) end;
@@ -9616,6 +9688,69 @@ cmd_tab() {
       | if ($c | startswith("~")) then ($c[1:] | tonumber? // null) else null end;
     def malformed: (.cost_usd // "") as $c
       | ($c != "") and (($c|startswith("~"))|not) and (($c|tonumber?) == null);
+_OSRC_TAB_DEFS
+}
+
+# _tab_json -> `tab --json`: the same totals as the text Tab, one JSON object.
+_tab_json() {
+  _json_need_jq tab
+  local _tot=0 _good _bad ql
+  if [ -f "$OSRC_LEDGER" ]; then
+    _tot="$(grep -cve '^[[:space:]]*$' "$OSRC_LEDGER" 2>/dev/null | head -1)"
+    case "$_tot" in ''|*[!0-9]*) _tot=0 ;; esac
+  fi
+  ql="$(_codex_quota_line 2>/dev/null)" || ql=""
+  if [ "$_tot" -eq 0 ]; then
+    jq -cn --arg led "$OSRC_LEDGER" --arg ql "$ql" \
+      '{schema_version:"1", ledger:$led, runs:0, cash_measured_usd:0, cash_estimated_usd:0,
+        cash_unmeasured_runs:0, cash_malformed_runs:0, plan_runs:0, plans:[], local_runs:0,
+        by_model:[], skipped_lines:0, codex_quota:(if $ql == "" then null else $ql end)}'
+    return 0
+  fi
+  _good="$(jq -Rc 'fromjson? | select(type=="object")' "$OSRC_LEDGER" 2>/dev/null | grep -c '^' 2>/dev/null | head -1)"
+  case "$_good" in ''|*[!0-9]*) _good=0 ;; esac
+  _bad=$(( _tot - _good )); [ "$_bad" -lt 0 ] && _bad=0
+  jq -R 'fromjson? | select(type=="object")' "$OSRC_LEDGER" 2>/dev/null | jq -cs "$(_tab_jq_defs)"'
+    ([ .[] | select(bucket=="cash") ]) as $cashlanes
+    | {schema_version:"1", ledger:$led, runs:length,
+       cash_measured_usd:(([ $cashlanes[] | realcost | select(. != null) ] | add) // 0),
+       cash_estimated_usd:(([ .[] | estcost | select(. != null) ] | add) // 0),
+       cash_unmeasured_runs:([ $cashlanes[] | select((.cost_usd // "") == "") ] | length),
+       cash_malformed_runs:([ $cashlanes[] | select(malformed) ] | length),
+       plan_runs:([ .[] | select(bucket=="plan") ] | length),
+       plans:([ .[] | select(bucket=="plan") ] | group_by(planname) | map({plan:(.[0] | planname), runs:length})),
+       local_runs:([ .[] | select(bucket=="free") ] | length),
+       by_model:(group_by(.model) | map({model:(.[0].model // null), runs:length})),
+       skipped_lines:($bad | tonumber),
+       codex_quota:(if $ql == "" then null else $ql end)}
+  ' --arg led "$OSRC_LEDGER" --arg bad "$_bad" --arg ql "$ql" || die "tab --json: could not parse the ledger"
+}
+
+cmd_tab() {
+  if [ "${1:-}" = "--json" ]; then _tab_json; return; fi
+  # An empty or absent ledger is an empty Tab. Decide BEFORE printing the header so the render is
+  # identical whether the file is missing, zero-length, or whitespace-only (the normal state between
+  # install and the first recorded run — record_ledger pre-creates an empty ledger.jsonl). Printing
+  # the "== The Tab ==" banner first and then "The Tab is empty" was a garbled papercut.
+  # NOTE: grep -c prints "0" AND exits 1 when nothing matches, so an or-echo-0 fallback after it produced
+  # "0\n0" on an empty-but-existing ledger and the arithmetic below crashed the whole Tab (#21
+  # follow-up). Take the first line and default to 0 instead; an empty ledger is an empty Tab.
+  local _tot=0 _good _bad
+  if [ -f "$OSRC_LEDGER" ]; then
+    _tot="$(grep -cve '^[[:space:]]*$' "$OSRC_LEDGER" 2>/dev/null | head -1)"
+    case "$_tot" in ''|*[!0-9]*) _tot=0 ;; esac
+  fi
+  [ "$_tot" -eq 0 ] && { echo "The Tab is empty (no offloads recorded yet)."; return 0; }
+  have jq || { echo "jq needed for tab (brew install jq)"; return 0; }
+  echo "== The Tab (outsourcerer ledger: $OSRC_LEDGER) =="
+  # RESILIENT PARSE: pre-filter with `fromjson? // empty` so ONE malformed/interleaved
+  # ledger line (plausible under the flock-fallback append warned about in record_ledger) drops just
+  # that row instead of failing the whole `jq -rs` slurp and blanking the entire Tab. Warn on stderr
+  # if rows were dropped so a corrupted ledger is visible, not silent.
+  _good="$(jq -Rc 'fromjson? | select(type=="object")' "$OSRC_LEDGER" 2>/dev/null | grep -c '^' 2>/dev/null | head -1)"; _good="${_good:-0}"
+  case "$_good" in ''|*[!0-9]*) _good=0 ;; esac
+  _bad=$(( _tot - _good )); [ "$_bad" -lt 0 ] && _bad=0
+  jq -R 'fromjson? | select(type=="object")' "$OSRC_LEDGER" 2>/dev/null | jq -rs "$(_tab_jq_defs)"'
     ([ .[] | select(bucket=="cash") ]) as $cashlanes
     | (([ $cashlanes[] | realcost | select(. != null) ] | add) // 0) as $cash
     | (([ .[]        | estcost  | select(. != null) ] | add) // 0) as $est
@@ -9642,10 +9777,44 @@ cmd_tab() {
   echo 'note: subscription and included-credit lanes have $0 cash cost but spend finite plan limits.'
 }
 
+# _estimate_json <in-tokens> -> `estimate --json`: the same quote table as the text form.
+_estimate_json() {
+  _json_need_jq estimate
+  local intok="$1" m pp pc usd rows="" cached=false plan="" code label opus
+  if [ -f "$OSRC_MODELS_JSON" ]; then
+    cached=true
+    _words_noglob "$(printf '%s' "${OR_OFFLOAD_CHAIN:-$OR_CHAIN_DEFAULT}" | tr ',' ' ')"
+    for m in ${WORDS[@]+"${WORDS[@]}"}; do
+      pp="$(jq -r --arg id "$m" '.data[]|select(.id==$id)|.pricing.prompt' "$OSRC_MODELS_JSON" 2>/dev/null)"
+      pc="$(jq -r --arg id "$m" '.data[]|select(.id==$id)|.pricing.completion' "$OSRC_MODELS_JSON" 2>/dev/null)"
+      if [ -n "$pp" ] && [ "$pp" != "null" ]; then
+        usd="$(awk -v i="$intok" -v pp="$pp" -v pc="$pc" 'BEGIN{printf "%.5f", i*pp + 2000*pc}')"
+      else usd=""; fi
+      rows="$rows$m"$'\t'"$usd"$'\n'
+    done
+  fi
+  for code in cx cc gm dv local tokenrouter; do
+    case "$code" in
+      cx) label="ChatGPT native" ;; cc) label="Claude native" ;; gm) label="Antigravity keyless" ;;
+      dv) label="Devin" ;; local) label="local" ;; tokenrouter) label="TokenRouter" ;;
+    esac
+    plan="$plan$code"$'\t'"$label"$'\t'"$(_lane_cost_disclosure "$code")"$'\n'
+  done
+  opus="$(awk -v i="$intok" 'BEGIN{printf "%.4f", i*0.000015 + 2000*0.000075}')"
+  jq -cn --arg intok "$intok" --arg rows "$rows" --arg plan "$plan" --arg opus "$opus" --argjson cached "$cached" '
+    {schema_version:"1", prompt_tokens:($intok | tonumber), assumed_output_tokens:2000, pricing_cached:$cached,
+     cash_chain:[$rows | split("\n")[] | select(length > 0) | split("\t") | {model:.[0], usd:(.[1] | tonumber? // null)}],
+     plan_lanes:[$plan | split("\n")[] | select(length > 0) | split("\t") | {lane:.[0], label:.[1], cost:.[2]}],
+     counterfactual_opus_usd:($opus | tonumber), counterfactual_basis:"opus at $15/M in, $75/M out"}'
+}
+
 cmd_estimate() {
+  _json_flag_split "$@"; local json="$_JSON"
+  set -- ${_JSON_ARGS[@]+"${_JSON_ARGS[@]}"}
   local task="$*"
   [ -n "$task" ] || die "estimate needs a task string to quote"
   local intok; intok="$(_est_tokens "$task")"
+  if [ "$json" = "1" ]; then _estimate_json "$intok"; return; fi
   echo "== estimate, prompt ~${intok} in-tokens; assuming ~2000 out-tokens =="
   if ! { have jq && [ -f "$OSRC_MODELS_JSON" ]; }; then
     echo "  (no cached pricing; run: $0 models --refresh)"
@@ -10080,7 +10249,46 @@ cmd_tap() {
 # cmd_brief -> the session-start handshake readout. READ-ONLY, never prompts (safe in bg/CI: prints
 # and returns). The orchestrator runs this on skill activation, then presents the mode menu
 # conversationally per the SKILL.md contract.
+# _brief_json -> `brief --json`: the session-start handshake as data. Same probes as the text brief,
+# plus the conserve decision as fields (binding window %, threshold, active) so a reader never parses prose.
+_brief_json() {
+  _json_need_jq brief
+  local lanes limits cur="" meaning="" reco notices tok c5="" c7="" x5="" xw="" xage=""
+  lanes="$(_ready_lanes 2>/dev/null)"
+  limits="$(_session_limits 2>/dev/null)"
+  for tok in $limits; do case "$tok" in
+    claude5h=*) c5="${tok#*=}" ;; claude7d=*) c7="${tok#*=}" ;;
+    codex5h=*)  x5="${tok#*=}" ;; codexwk=*)  xw="${tok#*=}" ;; codexage=*) xage="${tok#*=}" ;;
+  esac; done
+  reco="$(_conserve_reco "$limits" "$lanes" 2>/dev/null)"
+  if have devin; then notices="$(_plan_lanes_meter 2>&1)"; else notices="$(_plan_lanes_meter quiet 2>&1)"; fi
+  if cur="$(_mode_read 2>/dev/null)"; then meaning="$(_mode_meaning "$cur")"; else cur=""; fi
+  _exclude_active >/dev/null 2>&1 || true
+  # Same dead-link self-heal as the text brief; anything it prints goes to stderr so stdout stays JSON.
+  [ "${OSRC_BRIEF_NO_HEAL:-0}" = "1" ] || _parity_repair_deadlinks >&2 2>/dev/null || true
+  jq -cn --arg lanes "$lanes" --arg raw "$limits" --arg c5 "$c5" --arg c7 "$c7" --arg x5 "$x5" \
+    --arg xw "$xw" --arg xage "$xage" --arg thr "$OSRC_CONSERVE_THRESHOLD" --arg reco "$reco" \
+    --arg notices "$notices" --arg mode "$cur" --arg meaning "$meaning" --arg excl "$_OSRC_EXCL_LIST" '
+    def num: if . == "" then null else (tonumber? // null) end;
+    def lines: split("\n") | map(select(length > 0));
+    ($c5 | num) as $a | ($c7 | num) as $b | ($thr | num) as $t
+    | ([$a, $b] | map(select(. != null)) | max) as $bind
+    | {schema_version:"1",
+       lanes_installed:($lanes | split(" ") | map(select(length > 0))),
+       limits:{claude_5h_pct:$a, claude_7d_pct:$b, codex_5h_pct:($x5 | num), codex_weekly_pct:($xw | num),
+               codex_reading_age_s:($xage | num)},
+       limits_raw:(if $raw == "" then null else $raw end),
+       conserve:{threshold_pct:$t, binding_pct:$bind,
+                 active:(if $bind == null or $t == null then null else ($bind >= $t) end),
+                 recommendation:(if $reco == "" then null else ($reco | lines | join(" ")) end)},
+       notices:($notices | lines),
+       exclude:($excl | lines),
+       mode:(if $mode == "" then null else $mode end),
+       mode_meaning:(if $meaning == "" then null else $meaning end)}'
+}
+
 cmd_brief() {
+  if [ "${1:-}" = "--json" ]; then _brief_json; return; fi
   local lanes limits mode
   lanes="$(_ready_lanes 2>/dev/null)"
   limits="$(_session_limits 2>/dev/null)"
@@ -13267,6 +13475,9 @@ _explain_evidence() {
 # "(not recorded)" / "(none)" rather than erroring. Reconciles READ-ONLY so a read never mutates
 # the job dir. rc 0 on success, non-zero only for a missing job id (die).
 cmd_explain() {
+  local json=0
+  if [ "${1:-}" = "--json" ]; then json=1; shift; elif [ "${2:-}" = "--json" ]; then json=1; fi
+  [ "$json" = "0" ] || _json_need_jq explain
   local id="${1:-}"
   [ -n "$id" ] || die "explain needs a job id"
   local jd="$OSRC_JOBS/$id"
@@ -13292,6 +13503,23 @@ cmd_explain() {
   error="$(_explain_redact < "$jd/error" 2>/dev/null || printf '')"
   local last; last="$(_last_marker "$jd/out.log" 2>/dev/null || printf '')"
   local verdict; verdict="$(_classify_job "$id" 2>/dev/null || printf '')"
+  if [ "$json" = "1" ]; then
+    local ev=""
+    if [ "$st" = "permission-blocked" ] && [ -s "$jd/out.log" ]; then
+      ev="$(_explain_evidence "$jd/out.log" | tail -n +2 | sed 's/^  //')"
+    fi
+    jq -cn --arg job "$id" --arg verb "$verb" --arg model "$model" --arg provider "$provider" \
+      --arg st "$st" --arg exitc "$exitc" --arg reason "$reason" --arg error "$error" \
+      --arg marker "$last" --arg verdict "$verdict" --arg ev "$ev" '
+      def n: if . == "" or . == "?" then null else . end;
+      {schema_version:"1", job:$job, verb:($verb|n), model:($model|n), provider:($provider|n),
+       state:($st|n), exit:($exitc | tonumber? // null), reason:($reason|n), error:($error|n),
+       marker:($marker|n),
+       verdict:(($verdict | split("\t")) as $v | if ($v[0] // "") == "" then null
+                else {label:$v[0], reason:($v[1] // "" | n)} end),
+       evidence:(if $ev == "" then [] else ($ev | split("\n") | map(select(length > 0))) end)}'
+    return 0
+  fi
   printf 'job:       %s\n' "$id"
   printf 'verb:      %s\n' "$verb"
   printf 'model:     %s\n' "$model"
@@ -21571,7 +21799,7 @@ main() {
     __escalate-ladder)                                    # internal test: resolve + validate an escalation ladder
       _escalate_ladder_report "${1:-}" "" ;;
     doctor)   doctor "$@" ;;                               # health probe; `doctor --fix` also repairs dead parity links
-    brief)    cmd_brief ;;                                 # session-start handshake: lanes + limits + conserve + mode
+    brief)    cmd_brief "$@" ;;                                 # session-start handshake: lanes + limits + conserve + mode
     mode)     cmd_mode "$@" ;;                             # persisted copilot mode: status|auto|manual|hybrid|reset
     tap)      cmd_tap "$@" ;;                              # statusline limits tap: install|uninstall|status (universal limit-awareness)
     consent)  cmd_consent "$@" ;;                          # cloud-consent: status|grant|revoke (remembered ack)
