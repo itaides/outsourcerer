@@ -28,7 +28,7 @@ bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
 LOG="$TMP/server.log"
 python3 "$SRV" --cli "$SRC" --home "$OSRC_HOME" --port 0 > "$LOG" 2>"$TMP/server.err" & PID=$!
-for _ in $(seq 1 50); do grep -q 'dash: open' "$LOG" 2>/dev/null && break; sleep 0.1; done
+for _ in $(seq 1 300); do grep -q 'dash: open' "$LOG" 2>/dev/null && break; sleep 0.1; done   # up to 30 s: a loaded CI runner starts it slowly
 PORT="$(sed -n 's#^dash: open http://127.0.0.1:\([0-9]*\)/.*#\1#p' "$LOG")"
 [ -n "$PORT" ] || { echo "FAIL: server did not start: $(cat "$TMP/server.err")"; exit 1; }
 TOK="$(cat "$OSRC_HOME/dash/token")"
