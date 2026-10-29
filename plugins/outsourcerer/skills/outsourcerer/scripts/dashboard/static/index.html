@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Outsourcerer</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="app.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<div class="shell">
+  <nav class="rail" aria-label="Main">
+    <div class="brand">
+      <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><path d="M6.6 19.5 11.3 4.4c.2-.7 1.2-.8 1.5-.1l2.4 5.6-1.7 1.3 2.8.5 2.3 7.8z" fill="#8A5CF6"></path><path d="M3 20h18" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity=".6"></path></svg>
+      <span>Outsourcerer</span>
+    </div>
+    <a class="nav" href="#delegate" data-route="delegate"><span class="ico">+</span><span class="lbl">New delegation</span></a>
+    <a class="nav" href="#needs" data-route="needs"><span class="ico">◉</span><span class="lbl">Needs you</span><span class="badge" id="b-needs"></span></a>
+    <a class="nav" href="#live" data-route="live"><span class="ico">∿</span><span class="lbl">Live</span><span class="cnt" id="b-live"></span></a>
+    <a class="nav" href="#fuel" data-route="fuel"><span class="ico">◔</span><span class="lbl">Fuel</span><span class="cnt" id="b-fuel"></span></a>
+    <a class="nav" href="#outcomes" data-route="outcomes"><span class="ico">✓</span><span class="lbl">Outcomes</span><span class="cnt" id="b-outcomes"></span></a>
+    <a class="nav" href="#plans" data-route="plans"><span class="ico">⋔</span><span class="lbl">Plans</span><span class="cnt" id="b-plans"></span></a>
+    <div class="grow"></div>
+    <a class="nav" href="#lanes" data-route="lanes"><span class="ico">≡</span><span class="lbl">Lanes</span><span class="cnt" id="b-lanes"></span></a>
+    <a class="nav" href="#settings" data-route="settings"><span class="ico">⚙</span><span class="lbl">Settings</span></a>
+    <div class="ver mono" id="ver"></div>
+  </nav>
+  <div class="main">
+    <header class="top">
+      <span class="pill" id="mode-pill" title="Driving mode (outsourcerer mode)">…</span>
+      <a class="pill red" id="needs-pill" href="#needs" hidden></a>
+      <span class="grow"></span>
+      <span class="muted small">Refreshed <span class="mono" id="refreshed">—</span></span>
+      <span class="dot-label small" id="hb"><span class="dot gray"></span>Heartbeat</span>
+      <button class="ghost small" id="theme" type="button" aria-label="Toggle light or dark theme">◐</button>
+    </header>
+    <main id="view" tabindex="-1"></main>
+  </div>
+</div>
+<aside class="drawer" id="drawer" hidden aria-label="Run detail"></aside>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

@@ -555,6 +555,7 @@ _land_usage() {
   cat <<'EOF2'
 usage: outsourcerer land <task-id|job-id> [--plan P] [--check CMD | --no-check] [--setup CMD]
                          [--into BRANCH] [--pr] [--dry-run] [--force]
+       outsourcerer land queue [--json]   what is waiting to land and what is merging now
   Merges finished ship work into a branch, one land at a time per repo, only when it passes the
   done contract and the check still passes on the merged result.
   --plan P       plan the task belongs to (default: the current plan)
@@ -572,7 +573,54 @@ usage: outsourcerer land <task-id|job-id> [--plan P] [--check CMD | --no-check] 
 EOF2
 }
 
-cmd_land() { ( _land_run "$@" ); }
+cmd_land() {
+  if [ "${1:-}" = "queue" ]; then shift; _land_queue "$@"; return $?; fi
+  ( _land_run "$@" )
+}
+
+# _land_queue [--json] -> what is waiting to land and what is merging now. Lands go one at a time per
+# repo behind a lock, so "the queue" is: ship tasks that are done but not landed (oldest first), plus
+# the land currently holding each repo's lock. Read-only.
+_land_queue() {
+  local json=0
+  case "${1:-}" in --json) json=1 ;; "") ;; *) die "land queue: unknown option '$1' (use --json)" ;; esac
+  have jq || die "land queue needs jq"
+  local root d f items="[]" merging="[]" lk holder pid
+  root="$(_plans_root)"
+  for d in "$root"/*/; do
+    [ -f "$d/plan.json" ] || continue
+    for f in "$d"tasks/t*.json; do
+      [ -f "$f" ] || continue
+      items="$(jq -c --slurpfile t "$f" --slurpfile p "$d/plan.json" --arg plan "$(basename "$d")" '
+        ($t[0] // {}) as $t | ($p[0] // {}) as $p
+        | if (($t.shape // "scout") == "ship") and ($t.state == "done") and (($t.landed // false) != true)
+          then . + [{plan:$plan, task:($t.id // null), title:($t.title // null), repo:($p.repo // null),
+                     into:($p.base_branch // null), branch:($t.branch // null), done_at:($t.updated // null),
+                     check:(if ($t.evidence.check // null) == null then null
+                            else {cmd:($t.evidence.check.cmd // null), rc:($t.evidence.check.rc // null)} end),
+                     verdict:($t.evidence.verdict // null), land_error:($t.land_error // null)}]
+          else . end' <<<"$items" 2>/dev/null)" || return 1
+    done
+  done
+  for lk in "$OSRC_HOME"/locks/land-*; do
+    [ -d "$lk" ] && [ ! -L "$lk" ] || continue
+    holder="$(head -1 "$lk/holder" 2>/dev/null)"; pid="$(cut -d' ' -f1 "$lk/owner" 2>/dev/null | head -1)"
+    case "$pid" in ''|*[!0-9]*) pid="" ;; esac
+    merging="$(jq -c --arg h "$holder" --arg pid "$pid" --arg k "$(basename "$lk")" \
+      '. + [{lock:$k, holder:(if $h == "" then null else $h end), pid:(if $pid == "" then null else ($pid|tonumber) end)}]' <<<"$merging")" || return 1
+  done
+  items="$(jq -c 'sort_by(.done_at // "")' <<<"$items")"
+  if [ "$json" = 1 ]; then
+    jq -cn --argjson w "$items" --argjson m "$merging" '{schema_version:"1", merging:$m, waiting:$w}'; return 0
+  fi
+  jq -rn --argjson w "$items" --argjson m "$merging" '
+    ($m[] | "merging: \(.holder // "a land") (pid \(.pid // "?"))"),
+    (if ($w | length) == 0 then "nothing waiting to land" else
+      ($w | to_entries[] | "\(.key + 1). \(.value.plan)/\(.value.task) \(.value.title // "")  \(.value.branch // "?") -> \(.value.into // "?")  "
+        + (if .value.land_error then "last land failed: \(.value.land_error)"
+           elif .value.check == null then "no check recorded: lands as unverified"
+           elif .value.check.rc == 0 then "check passed" else "check rc=\(.value.check.rc)" end)) end)'
+}
 
 # _land_run -- body of `land`, always in a subshell so its EXIT trap (integration worktree + lock
 # cleanup) never replaces the main script's traps, and a die() anywhere still cleans up.
