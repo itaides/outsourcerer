@@ -84,6 +84,12 @@ printf '{"id":"t1","title":"pick a store","state":"held","shape":"scout","deps":
 jq -e '.hold.answer == "SQLite; drop table x" and .state != "held"' "$OSRC_HOME/plans/rl/tasks/t1.json" >/dev/null \
   && ok "the answer is stored verbatim (an argv element, never shell)" || bad "answer: $(cat "$OSRC_HOME/plans/rl/tasks/t1.json")"
 
+# posture reset clears remembered postures
+mkdir -p "$OSRC_HOME/lane-posture"; printf 'refused\n' > "$OSRC_HOME/lane-posture/dv.yolo"
+[ "$(post '{"argv":["posture","reset"]}')" = 200 ] && jq -e .ok "$TMP/body" >/dev/null && [ ! -e "$OSRC_HOME/lane-posture/dv.yolo" ] \
+  && ok "posture reset runs" || bad "posture reset: $(cat "$TMP/body")"
+[ "$(post '{"argv":["posture","reset","--all"]}')" = 403 ] && ok "refused: posture reset --all" || bad "posture reset --all allowed"
+
 # a failing action is a 200 with ok:false and its exit code, not a server error
 [ "$(post '{"argv":["cancel","no-such-job"]}')" = 200 ] && jq -e '(.ok | not) and .exit != 0' "$TMP/body" >/dev/null \
   && ok "a failing action reports its exit code" || bad "failing action: $(cat "$TMP/body")"
