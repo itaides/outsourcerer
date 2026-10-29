@@ -516,8 +516,11 @@ bash -c ". \"$LIB\"; _factory_done_check() { _task_update fx $d2 '.state = \"can
 check "#6 a failing check does not restore over a concurrent cancel" "[ \"\$(jq -r .state \"\$(TJ fx $d2)\")\" = canceled ]"
 d3="$(O task add 'done interrupted' --plan fx 2>/dev/null)"
 L "_task_update fx $d3 '.state = \"running\" | .job = \"JD3\"'" >/dev/null
-bash -c ". \"$LIB\"; _factory_done_check() { sleep 1; echo ok; return 0; }; cmd_task done $d3 --plan fx" >/dev/null 2>&1 & DP=$!
-i=0; while [ "$i" -lt 50 ] && [ "$(jq -r .state "$(TJ fx $d3)")" != verifying ]; do sleep 0.1; i=$((i + 1)); done
+# The fake check must still be running when the TERM lands. It was `sleep 1`: on a loaded runner the
+# poll below (a jq per 0.1 s) saw `verifying` late, the check finished first and the task went to done.
+# It is killed anyway, so a long sleep costs nothing; the poll waits up to 30 s for `verifying`.
+bash -c ". \"$LIB\"; _factory_done_check() { sleep 30; echo ok; return 0; }; cmd_task done $d3 --plan fx" >/dev/null 2>&1 & DP=$!
+i=0; while [ "$i" -lt 300 ] && [ "$(jq -r .state "$(TJ fx $d3)")" != verifying ]; do sleep 0.1; i=$((i + 1)); done
 kill -TERM "$DP" 2>/dev/null; wait "$DP"; rc=$?
 check "#6 an interrupted done check puts the task back (not stuck in verifying)" \
   "[ $rc -eq 130 ] && [ \"\$(jq -r .state \"\$(TJ fx $d3)\")\" = running ]"
