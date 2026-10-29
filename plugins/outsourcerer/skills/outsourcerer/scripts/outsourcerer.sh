@@ -9312,7 +9312,11 @@ _INBOX_JQ='
   def sev: if .severity == "red" then 0 else 1 end;
   def kind_rank: ["permission","blocked","model_drift","decision","waiting_on_you","not_delivered","maybe_stuck","unwatched"] as $o
     | (.kind as $k | $o | index($k)) // 99;
-  .now as $now | .window_s as $win |
+  .now as $now | .window_s as $win
+  # Sessions still alive, for the undelivered-message rule. Bound HERE, up front: written mid-sum as
+  # `[a] + [b] + (X) as $live | ...`, jq 1.8 binds the WHOLE sum (dropping a and b) where 1.7 bound X.
+  | ([ .sessions[] | select(.state != "ended" and .state != "dead") | .session_id ]) as $live
+  |
   ( [ .jobs[] | . as $j | ($j.status_age // 0) as $age
       | ( if $j.status == "permission-blocked" and $age <= $win then
             {kind:"permission", severity:"red",
@@ -9366,9 +9370,7 @@ _INBOX_JQ='
          primary_action:{label:"Answer", argv:["outsourcerer","task","release",$t.id,"--plan",$t.plan,"--answer","{answer}"], input:"answer"},
          refs:{plan:$t.plan, task:$t.id}}
       | if .default then . + {secondary_action:act("Use default (\(.default))"; ["outsourcerer","task","release",$t.id,"--plan",$t.plan,"--answer",.default])} else . end ]
-  + ([ .sessions[] | select(.state != "ended" and .state != "dead") | .session_id ]) as $live
-  | . as $root
-  | [ $root.obligations[] | select(.state == "delivery_unknown")
+  + [ .obligations[] | select(.state == "delivery_unknown")
       | ((try (.ts | fromdateiso8601) catch null) as $u | if $u == null then null else ($now - $u) end) as $oage
       | select(($oage != null and $oage <= $win) or (.session_id as $sid | $live | index($sid) != null))
       | {kind:"not_delivered", severity:"amber", key:("s:" + .session_id), title:"A message was not confirmed delivered",
